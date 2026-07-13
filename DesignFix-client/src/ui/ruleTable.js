@@ -82,7 +82,8 @@ function mapStateToProps(state) {
     else if (state.currentHash[0] === hashConst.violatedRules)
         props.indicesOfRulesToDisplay = state.ruleTable
             .filter(d => d.xPathQueryResult.map(dd => dd.data.violated).reduce((a, b) => { return a + b }, 0) !== 0)
-            .map(d => d.index);
+            .map(d => d.index)
+            .sort((a, b) => Number(a) - Number(b));
 
     return props;
 }

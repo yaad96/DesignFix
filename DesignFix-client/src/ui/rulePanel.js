@@ -123,7 +123,7 @@ class RulePanel extends Component {
                             onClick={() => this.changeEditMode()}
                             className={"react-icons"} />
                     </div>
-                    <ControlLabel>{this.state.title}</ControlLabel>
+                    <ControlLabel>{this.props.hash0 === hashConst.violatedRules ? `${this.ruleIndex}: ${this.state.title}` : this.state.title}</ControlLabel>
                     <p>{this.state.description}</p>
                 </FormGroup>
                 <Collapse in={this.state.openPanel}>
@@ -481,6 +481,7 @@ function mapStateToProps(state) {
         xmlFiles: state.xmlFiles,
         rules: state.ruleTable,
         tagTable: state.tagTable,
+        hash0: state.currentHash[0],
         codeChanged: state.currentHash[0] === hashConst.codeChanged,
         filePath: [hashConst.rulesForFile, hashConst.codeChanged].indexOf(state.currentHash[0]) !== -1 ?
             (state.openFilePath) : none_filePath,

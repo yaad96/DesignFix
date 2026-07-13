@@ -21,11 +21,9 @@ Required:
   --rule=<id>                 Rule index from the target project's ruleTable.json.
   --violation-file=<path>     File in which the checker reported the violation.
 
-Violation code (choose one):
+Violation code (optional; omit so the agent locates the snippet itself):
   --snippet=<text>            Violating code supplied inline.
   --snippet-file=<path>       Text file containing the violating code.
-  --start-line=<N> --end-line=<N>
-                              Extract an inclusive line range from violation-file.
   --checker-output-file=<path>
                               Use the exact checker output as the visible report.
                               Rule ID is still read from ruleTable.json for logging.
@@ -49,8 +47,10 @@ Metadata/output:
   --quiet                     Do not print the full prompt.
   --help
 
-The visible prompt intentionally includes designfix_rule_id and designfix_run_id
-because the collection script uses them to map the latest completed Cline task.
+The visible prompt contains only checker-equivalent information: the rule and its
+violation report. It carries no experiment identifiers, so it can be pasted into
+Cline verbatim. The collection script maps the completed task to its reserved run
+via explicit --rule/--run plus a prompt-hash check against this prompt.
 It does not include a satisfying example, surrounding context, candidate fix
 files, the complete violation file, or cross-file repair hints.
 `.trimStart());
@@ -92,11 +92,10 @@ if (violationRelative.startsWith("../") || violationRelative === "..") {
 const sourceChoices = [
     flags.snippet !== undefined && flags.snippet !== true,
     flags["snippet-file"] !== undefined && flags["snippet-file"] !== true,
-    flags["start-line"] !== undefined || flags["end-line"] !== undefined,
     flags["checker-output-file"] !== undefined && flags["checker-output-file"] !== true,
 ].filter(Boolean).length;
-if (sourceChoices !== 1) {
-    die("Choose exactly one violation source: --snippet, --snippet-file, line range, or --checker-output-file.");
+if (sourceChoices > 1) {
+    die("Choose at most one violation source: --snippet, --snippet-file, or --checker-output-file.");
 }
 
 let violationSnippet = "";
@@ -111,18 +110,7 @@ if (flags.snippet !== undefined && flags.snippet !== true) {
     const checkerPath = path.resolve(String(flags["checker-output-file"]));
     if (!fs.existsSync(checkerPath)) die(`Checker-output file not found: ${checkerPath}`);
     exactCheckerOutput = normalizeText(fs.readFileSync(checkerPath, "utf8"));
-} else {
-    if (flags["start-line"] === undefined || flags["end-line"] === undefined) {
-        die("Both --start-line and --end-line are required for line extraction.");
-    }
-    const start = positiveInteger(flags["start-line"], "--start-line");
-    const end = positiveInteger(flags["end-line"], "--end-line");
-    if (end < start) die("--end-line must be greater than or equal to --start-line.");
-    const lines = fs.readFileSync(violationPath, "utf8").replace(/\r\n/g, "\n").split("\n");
-    if (start > lines.length) die(`--start-line exceeds file length (${lines.length}).`);
-    violationSnippet = lines.slice(start - 1, Math.min(end, lines.length)).join("\n").trim();
 }
-if (!exactCheckerOutput && !violationSnippet) die("The violating snippet is empty.");
 if (exactCheckerOutput !== null && !exactCheckerOutput) die("The checker output is empty.");
 
 const dataRoot = path.resolve(flags["data-root"] && flags["data-root"] !== true
@@ -148,16 +136,14 @@ fs.mkdirSync(runDir, { recursive: true });
 
 const tags = Array.isArray(rule.tags) && rule.tags.length ? rule.tags.join(", ") : "(none)";
 const description = rule.description || "(no description provided)";
+const violatingCodeBlock = violationSnippet
+    ? `\n\nViolating code:\n\`\`\`java\n${violationSnippet}\n\`\`\``
+    : "";
 const report = exactCheckerOutput !== null
     ? exactCheckerOutput
-    : `Rule: ${rule.title || `Rule ${rule.index}`}\n\nDescription:\n${description}\n\nTags: ${tags}\n\nViolation file:\n${violationRelative}\n\nViolating code:\n\`\`\`java\n${violationSnippet}\n\`\`\``;
+    : `Rule: ${rule.title || `Rule ${rule.index}`}\n\nDescription:\n${description}\n\nTags: ${tags}\n\nViolation file:\n${violationRelative}${violatingCodeBlock}`;
 
 const prompt = `You are repairing one design-rule violation in this Java repository.
-
-<<<DESIGNFIX_EXPERIMENT_META>>>
-designfix_rule_id: ${rule.index}
-designfix_run_id: ${runLabel}
-<<<END_DESIGNFIX_EXPERIMENT_META>>>
 
 The project's design-rule checker reported the following violation:
 
@@ -203,13 +189,13 @@ const metadata = {
     },
     baselineSnapshotSaved: snapshotEnabled,
     modelVisibleInputs: {
-        internalRuleId: true,
-        internalRunId: true,
+        internalRuleId: false,
+        internalRunId: false,
         ruleTitle: exactCheckerOutput === null,
         ruleDescription: exactCheckerOutput === null,
         ruleTags: exactCheckerOutput === null,
         violationFilePath: exactCheckerOutput === null,
-        violationSnippet: exactCheckerOutput === null,
+        violationSnippet: exactCheckerOutput === null && violationSnippet !== "",
         exactCheckerOutput: exactCheckerOutput !== null,
         fullViolationFile: false,
         satisfyingExample: false,

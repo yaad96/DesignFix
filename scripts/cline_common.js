@@ -220,6 +220,14 @@ const TEXTISH_BASENAMES = new Set([
     "gradlew", "mvnw", "makefile", "dockerfile", ".gitignore", ".gitattributes",
 ]);
 
+// Scratch files the DesignFix extension writes into the target project root
+// (see DesignFix-Extension/src/Constants.ts). They are not part of the target
+// codebase; excluding them keeps snapshots and workspace diffs free of noise
+// if the extension is active while a Cline task runs.
+const DESIGNFIX_SCRATCH_BASENAMES = new Set([
+    "tempexprfile.java", "tempresultxmlfile.xml", "temptestfile.java", "output.xml",
+]);
+
 function looksBinary(buffer) {
     const sample = buffer.subarray(0, Math.min(buffer.length, 8192));
     for (const byte of sample) if (byte === 0) return true;
@@ -229,6 +237,7 @@ function looksBinary(buffer) {
 function shouldSnapshotFile(filePath, stat, maxBytes) {
     if (!stat.isFile() || stat.size > maxBytes) return false;
     const base = path.basename(filePath).toLowerCase();
+    if (DESIGNFIX_SCRATCH_BASENAMES.has(base)) return false;
     const ext = path.extname(base);
     return TEXTISH_EXTENSIONS.has(ext) || TEXTISH_BASENAMES.has(base) || ext === "";
 }

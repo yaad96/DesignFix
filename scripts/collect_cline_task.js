@@ -13,22 +13,30 @@ const RUN_RE = /designfix_run_id\s*:\s*0*(\d+)/i;
 
 function help() {
     process.stdout.write(`
-Collect the latest completed Cline task containing a DesignFix experiment marker.
-The generator reserves cline_data/rule_<id>/run_<NN>/; this script fills it with
-Cline logs, a normalized conversation, usage observations, and workspace changes.
+Collect the newest completed Cline task for a reserved run and fill
+cline_data/rule_<id>/run_<NN>/ with the Cline logs, a normalized conversation,
+usage observations, and workspace changes.
+
+The prompt carries no experiment marker, so identify the run explicitly with
+--rule and --run. The collector selects the newest completed repair task and
+verifies its prompt matches the reserved run's prompt before writing anything.
 
 Usage:
-  node scripts/collect_cline_task.js [options]
+  node scripts/collect_cline_task.js --rule=<id> --run=<N> [options]
 
 Common options:
+  --rule=<id>                 Rule of the reserved run to collect. Required
+                              unless the task still carries a legacy marker.
+  --run=<N>                   Reserved run number to collect. Required unless
+                              the task still carries a legacy marker.
   --cline-storage=<path>      Cline extension global-storage directory.
                               Usually auto-discovered.
   --cline-task-dir=<path>     Directly use a known Cline task folder.
   --data-root=<path>          Default: sibling cline_data next to client repo.
   --project-root=<path>       Override the project path saved by the generator.
-  --rule=<id>                 Filter candidates to one rule.
-  --run=<N>                   Filter candidates to one reserved run.
   --allow-incomplete          Collect even without completion evidence.
+  --allow-prompt-mismatch     Proceed even if the task prompt does not match the
+                              reserved prompt (use only after manual review).
   --overwrite                 Replace already-collected data for the run.
   --include-checkpoints       Copy checkpoint/cache folders too (can be large).
   --list                      List matching task candidates without collecting.
@@ -105,6 +113,34 @@ function choosePrompt(strings, ruleId, runNumber) {
         return score(b) - score(a);
     });
     return candidates[0] ? normalizeText(candidates[0]) : "";
+}
+
+function collapseWhitespace(text) {
+    return String(text).replace(/\s+/g, " ").trim();
+}
+
+// Confirm the selected Cline task actually ran this run's reserved prompt. The
+// prompt carries no experiment marker, so --rule/--run only target the run
+// folder; this containment check (all whitespace collapsed, so it tolerates
+// Cline's <task> wrapper and appended environment details) is what verifies the
+// mapping and catches paste errors or same-rule trial mixups.
+function verifyPromptMatch(reservedPrompt, taskCombinedText) {
+    const needle = collapseWhitespace(reservedPrompt);
+    const haystack = collapseWhitespace(taskCombinedText);
+    if (!needle) return { verified: false, method: "containment", reason: "reserved prompt is empty or missing" };
+    if (haystack.includes(needle)) return { verified: true, method: "containment" };
+    return { verified: false, method: "containment", reason: "reserved prompt text was not found in the Cline task log" };
+}
+
+// Non-fatal integrity check: does prompt.txt still hash to the value recorded at
+// generation time? Tolerates line-ending variation so it does not false-alarm.
+function reservedPromptIntegrityOk(reservedPrompt, recordedSha) {
+    if (!recordedSha || !reservedPrompt) return true;
+    const variants = [
+        reservedPrompt.replace(/\n+$/, ""),
+        reservedPrompt.replace(/\r\n/g, "\n").replace(/\n+$/, ""),
+    ];
+    return variants.some((v) => sha256Text(v) === recordedSha);
 }
 
 function summarizeUsage(fields) {
@@ -238,6 +274,25 @@ if (existingMeta.runNumber && Number(existingMeta.runNumber) !== selected.runNum
     die(`Run mismatch: reserved=${existingMeta.runNumber}, Cline task=${selected.runNumber}.`);
 }
 
+// Verify the selected task ran this run's reserved prompt before doing any work.
+const reservedPromptPath = path.join(runDir, "prompt.txt");
+const reservedPrompt = fs.existsSync(reservedPromptPath) ? fs.readFileSync(reservedPromptPath, "utf8") : "";
+if (!reservedPromptIntegrityOk(reservedPrompt, existingMeta.promptSha256)) {
+    console.error("Warning: prompt.txt no longer matches the promptSha256 recorded at generation; it may have been edited after the run was reserved.");
+}
+// Match against DECODED string values (Cline stores the prompt JSON-escaped, so
+// corpus.combined has literal \\n sequences; corpus.strings holds parsed values).
+const taskDecodedText = selected.corpus.strings.map((s) => s.value).join("\n");
+const promptMatch = verifyPromptMatch(reservedPrompt, taskDecodedText);
+if (!promptMatch.verified && !flags["allow-prompt-mismatch"]) {
+    die(`Prompt verification failed for rule ${selected.ruleId} run ${runLabel}: ${promptMatch.reason}.\n`
+        + `The selected task (${selected.taskId}, newest completed repair task) does not contain this run's reserved prompt.\n`
+        + `Collect the correct run, or pass --allow-prompt-mismatch to override after manually confirming the task.`);
+}
+if (!promptMatch.verified) {
+    console.error(`Warning: proceeding despite prompt mismatch (--allow-prompt-mismatch): ${promptMatch.reason}.`);
+}
+
 const rawDir = path.join(runDir, "cline_task_raw");
 if (fs.existsSync(rawDir)) fs.rmSync(rawDir, { recursive: true, force: true });
 fs.mkdirSync(rawDir, { recursive: true });
@@ -343,6 +398,8 @@ const finalMeta = {
         sourceDirectory: selected.taskDir,
         modifiedAt: selected.modifiedAt,
         completionEvidence: selected.completion,
+        promptVerification: promptMatch,
+        reservedPromptSha256: existingMeta.promptSha256 || null,
         extractedPromptSha256: selected.prompt ? sha256Text(selected.prompt) : null,
         rawFilesCopied: rawManifest.copied.length,
         rawFilesSkipped: rawManifest.skipped.length,
