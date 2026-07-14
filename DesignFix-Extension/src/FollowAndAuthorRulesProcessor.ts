@@ -9,7 +9,7 @@ import * as fs1 from 'fs';
 import { FileChangeManager } from './FileChangeManager';
 import { writeToFile, convertToXML, findFileAndReadContent } from './utilites';
 
-import { diffLines } from 'diff';
+import { reconcile, describeReconcile, ReconcileResult } from './reconcile';
 import { codeLensChangeEmitter } from './extension';
 
 export interface DiffChunk {
@@ -43,10 +43,6 @@ export class FollowAndAuthorRulesProcessor {
     private ruleTable: any[]; // Consider using a more specific type
     private tagTable: Tag[];
     private currentProjectPath: string;
-    private originalDiffDecoration: vscode.TextEditorDecorationType | null = null;
-    private modifiedDiffDecoration: vscode.TextEditorDecorationType | null = null;
-    private originalDiffEditor: vscode.TextEditor | null = null;
-    private modifiedDiffEditor: vscode.TextEditor | null = null;
     public readonly wsMessages: string[] = [
         WebSocketConstants.RECEIVE_EDIT_FIX,
         WebSocketConstants.SEND_CONTENT_FOR_EDIT_FIX,
@@ -126,58 +122,8 @@ export class FollowAndAuthorRulesProcessor {
         this.loadRuleTable();
     }
 
-    private clearDiffDecorationsInternal(): void {
-        if (this.originalDiffDecoration && this.originalDiffEditor) {
-            try {
-                this.originalDiffEditor.setDecorations(this.originalDiffDecoration, []);
-            } catch (error) {
-                console.warn('Failed to clear original diff decoration:', error);
-            }
-            this.originalDiffDecoration.dispose();
-        }
-
-        if (this.modifiedDiffDecoration && this.modifiedDiffEditor) {
-            try {
-                this.modifiedDiffEditor.setDecorations(this.modifiedDiffDecoration, []);
-            } catch (error) {
-                console.warn('Failed to clear modified diff decoration:', error);
-            }
-            this.modifiedDiffDecoration.dispose();
-        }
-
-        this.originalDiffDecoration = null;
-        this.modifiedDiffDecoration = null;
-        this.originalDiffEditor = null;
-        this.modifiedDiffEditor = null;
-    }
-
-    public clearDiffDecorations(): void {
-        this.clearDiffDecorationsInternal();
-    }
-
     private normalizeNewlines(text: string): string {
         return text.replace(/\r\n/g, '\n');
-    }
-
-    private denormalizeNewlines(text: string, lineEnding: string): string {
-        if (lineEnding === '\n') {
-            return text.replace(/\r\n/g, '\n');
-        }
-        return this.normalizeNewlines(text).replace(/\n/g, lineEnding);
-    }
-
-    private computeActualOffset(sourceNormalized: string, normalizedIndex: number, lineEnding: string): number {
-        const prefix = sourceNormalized.slice(0, normalizedIndex);
-        return this.denormalizeNewlines(prefix, lineEnding).length;
-    }
-
-    private escapeRegExp(input: string): string {
-        return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
-    private buildFlexiblePattern(snippet: string): string {
-        const escaped = this.escapeRegExp(snippet);
-        return escaped.replace(/\s+/g, '\\s+');
     }
 
     public getRuleTableForClient(): string {
@@ -837,68 +783,61 @@ export class FollowAndAuthorRulesProcessor {
     }
 
 
-    private applyDiffHighlights(
-        originalEditor: vscode.TextEditor,
-        modifiedEditor: vscode.TextEditor,
-        normalizedOriginal: string,
-        normalizedNew: string,
-        lineEnding: string
-    ): void {
-        const diffs = diffLines(normalizedOriginal, normalizedNew);
-        const addedRanges: vscode.DecorationOptions[] = [];
-        const removedRanges: vscode.DecorationOptions[] = [];
+    /**
+     * Layer 2: present a reconciled fix in VS Code's native diff editor.
+     * Left pane: the real file on disk (read-only view of truth). Right pane:
+     * an EDITABLE untitled document holding the minimal patched content - the
+     * user may hand-tune the suggestion before accepting, and the accept
+     * command re-reconciles whatever ends up in that buffer.
+     */
+    private async openFixReview(
+        targetPath: string,
+        originalContent: string,
+        rec: ReconcileResult,
+        explanation: string,
+        showNotification: boolean
+    ): Promise<void> {
+        const fileName = path.basename(targetPath);
+        const patchedDoc = await vscode.workspace.openTextDocument({
+            language: 'java',
+            content: rec.patchedText
+        });
 
-        let originalOffset = 0;
-        let newOffset = 0;
+        await vscode.commands.executeCommand(
+            'vscode.diff',
+            vscode.Uri.file(targetPath),
+            patchedDoc.uri,
+            `DesignFix: ${fileName} (original ↔ suggested fix)`,
+            { preview: false }
+        );
 
-        for (const part of diffs) {
-            const value = part.value ?? '';
-            if (!value.length) {
-                continue;
-            }
+        const patchedTextNow = patchedDoc.getText();
+        diffChunks.push({
+            range: new vscode.Range(patchedDoc.positionAt(0), patchedDoc.positionAt(0)),
+            newText: patchedTextNow,
+            originalText: originalContent,
+            fullOriginalContent: originalContent,
+            filePath: targetPath,
+            startOffset: 0,
+            endOffset: patchedTextNow.length,
+            modifiedUri: patchedDoc.uri.toString()
+        });
+        await vscode.commands.executeCommand('setContext', 'designfix.reviewActive', true);
+        codeLensChangeEmitter.fire();
 
-            if (part.added) {
-                const actualStart = this.computeActualOffset(normalizedNew, newOffset, lineEnding);
-                const actualLength = this.denormalizeNewlines(value, lineEnding).length;
-                const range = new vscode.Range(
-                    modifiedEditor.document.positionAt(actualStart),
-                    modifiedEditor.document.positionAt(actualStart + actualLength)
-                );
-                addedRanges.push({ range });
-                newOffset += value.length;
-                continue;
-            }
-
-            if (part.removed) {
-                const actualStart = this.computeActualOffset(normalizedOriginal, originalOffset, lineEnding);
-                const actualLength = this.denormalizeNewlines(value, lineEnding).length;
-                const range = new vscode.Range(
-                    originalEditor.document.positionAt(actualStart),
-                    originalEditor.document.positionAt(actualStart + actualLength)
-                );
-                removedRanges.push({ range });
-                originalOffset += value.length;
-                continue;
-            }
-
-            originalOffset += value.length;
-            newOffset += value.length;
+        if (explanation) {
+            vscode.window.setStatusBarMessage(`LLM explanation: ${explanation}`, 8000);
         }
 
-        const addedDecoration = vscode.window.createTextEditorDecorationType({
-            backgroundColor: 'rgba(46, 160, 67, 0.35)'
-        });
-        const removedDecoration = vscode.window.createTextEditorDecorationType({
-            backgroundColor: 'rgba(248, 81, 73, 0.35)'
-        });
-
-        modifiedEditor.setDecorations(addedDecoration, addedRanges);
-        originalEditor.setDecorations(removedDecoration, removedRanges);
-
-        this.modifiedDiffDecoration = addedDecoration;
-        this.originalDiffDecoration = removedDecoration;
-        this.modifiedDiffEditor = modifiedEditor;
-        this.originalDiffEditor = originalEditor;
+        if (showNotification) {
+            const summary = `DesignFix: ${fileName} — ${describeReconcile(rec)}.`;
+            const choice = await vscode.window.showInformationMessage(summary, 'Accept Fix', 'Reject');
+            if (choice === 'Accept Fix') {
+                await vscode.commands.executeCommand('designfix.acceptChange', patchedDoc.uri);
+            } else if (choice === 'Reject') {
+                await vscode.commands.executeCommand('designfix.rejectChange', patchedDoc.uri);
+            }
+        }
     }
 
     /**
@@ -1042,41 +981,29 @@ export class FollowAndAuthorRulesProcessor {
             console.warn('Provided original content does not match the current file on disk. Proceeding with on-disk version.');
         }
 
-        const lineEnding = fileContent.includes('\r\n') ? '\r\n' : '\n';
-        const normalizedOriginal = this.normalizeNewlines(fileContent);
-        const normalizedNew = this.normalizeNewlines(newContentRaw);
+        // Layer 1: rebuild the suggestion as ORIGINAL + minimal hunks so that
+        // formatting-only drift disappears and truncated LLM output cannot
+        // silently delete code.
+        const rec = reconcile(fileContent, newContentRaw);
 
-        const originalDoc = await vscode.workspace.openTextDocument(targetPath);
-        const originalEditor = await vscode.window.showTextDocument(originalDoc, vscode.ViewColumn.One);
+        if (rec.identicalAfterReconcile) {
+            vscode.window.showInformationMessage(
+                `DesignFix: the suggestion for ${path.basename(targetPath)} matches the current file ` +
+                `(only whitespace/formatting differs) — nothing to apply.`
+            );
+            return;
+        }
 
-        const newDoc = await vscode.workspace.openTextDocument({
-            language: originalDoc.languageId || 'java',
-            content: newContentRaw
-        });
-        const newEditor = await vscode.window.showTextDocument(newDoc, { viewColumn: vscode.ViewColumn.Two, preview: false });
-
-        this.clearDiffDecorationsInternal();
-        this.applyDiffHighlights(originalEditor, newEditor, normalizedOriginal, normalizedNew, lineEnding);
+        if (rec.truncationSuspected) {
+            vscode.window.showWarningMessage(
+                `DesignFix: the raw suggestion would have deleted ${rec.keptDeletionLines} line(s) with no ` +
+                `replacement (possibly truncated LLM output). Those original lines were kept; review the diff.`
+            );
+            console.warn(`DesignFix reconcile: ${rec.truncationDetail}`);
+        }
 
         diffChunks.length = 0;
-        const lensRange = new vscode.Range(newDoc.positionAt(0), newDoc.positionAt(0));
-        const newDocText = newDoc.getText();
-        diffChunks.push({
-            range: lensRange,
-            newText: newDocText,
-            originalText: originalDoc.getText(),
-            fullOriginalContent: fileContent,
-            filePath: targetPath,
-            startOffset: 0,
-            endOffset: newDocText.length,
-            modifiedUri: newDoc.uri.toString()
-        });
-
-        codeLensChangeEmitter.fire();
-
-        if (explanation) {
-            vscode.window.setStatusBarMessage(`LLM explanation: ${explanation}`, 5000);
-        }
+        await this.openFixReview(targetPath, fileContent, rec, explanation, true);
     }
 
     /**
@@ -1104,84 +1031,80 @@ export class FollowAndAuthorRulesProcessor {
             return;
         }
 
-        // Show the same review UX as single-file fixes, but one diff per changed
-        // file: original on the left, modified (untitled) on the right, each with
-        // its own Accept Change / Reject Change CodeLenses. Nothing is written to
-        // disk until the user accepts an individual file.
-        this.clearDiffDecorationsInternal();
+        // Show the same review UX as single-file fixes, but one native diff per
+        // changed file, each holding the RECONCILED (minimal) suggestion.
+        // Nothing is written to disk until the user accepts an individual file.
         diffChunks.length = 0;
 
         let opened = 0;
         const alreadySatisfied: string[] = [];
+        const truncationWarnings: string[] = [];
         for (const r of resolved) {
-            let originalContent = '';
-            let originalDoc: vscode.TextDocument | null = null;
+            let originalContent: string | null = null;
             try {
                 originalContent = await fs.readFile(r.path, { encoding: 'utf8' });
-                originalDoc = await vscode.workspace.openTextDocument(r.path);
-            } catch (err) {
-                // File does not exist yet (fix creates a new file): no original pane.
-                console.warn(`No existing file for ${r.path}; showing modified content only.`);
+            } catch {
+                // File does not exist yet (fix creates a new file).
+                console.warn(`No existing file for ${r.path}; showing new-file content for review.`);
             }
 
-            // If the file on disk already matches the LLM's proposed content, there
-            // is nothing to review (e.g. the fix was applied on a previous run).
-            // Skip it so we don't open an empty, un-highlighted diff.
-            if (originalDoc && this.normalizeNewlines(originalContent) === this.normalizeNewlines(r.content)) {
-                alreadySatisfied.push(path.basename(r.path));
+            if (originalContent === null) {
+                // New file: nothing to reconcile against - review the proposed
+                // content directly; accepting writes it as-is.
+                const newDoc = await vscode.workspace.openTextDocument({ language: 'java', content: r.content });
+                await vscode.window.showTextDocument(newDoc, { viewColumn: vscode.ViewColumn.Two, preview: false });
+                const text = newDoc.getText();
+                diffChunks.push({
+                    range: new vscode.Range(newDoc.positionAt(0), newDoc.positionAt(0)),
+                    newText: text,
+                    originalText: '',
+                    fullOriginalContent: '',
+                    filePath: r.path,
+                    startOffset: 0,
+                    endOffset: text.length,
+                    modifiedUri: newDoc.uri.toString()
+                });
+                opened++;
                 continue;
             }
 
-            let originalEditor: vscode.TextEditor | undefined;
-            if (originalDoc) {
-                originalEditor = await vscode.window.showTextDocument(originalDoc, { viewColumn: vscode.ViewColumn.One, preview: false });
+            const rec = reconcile(originalContent, r.content);
+
+            // Nothing genuinely changes (already applied, or formatting-only).
+            if (rec.identicalAfterReconcile) {
+                alreadySatisfied.push(path.basename(r.path));
+                continue;
+            }
+            if (rec.truncationSuspected) {
+                truncationWarnings.push(`${path.basename(r.path)}: kept ${rec.keptDeletionLines} line(s)`);
+                console.warn(`DesignFix reconcile (${r.path}): ${rec.truncationDetail}`);
             }
 
-            const lineEnding = originalContent.includes('\r\n') ? '\r\n' : '\n';
-            const newDoc = await vscode.workspace.openTextDocument({
-                language: (originalDoc && originalDoc.languageId) || 'java',
-                content: r.content
-            });
-            const newEditor = await vscode.window.showTextDocument(newDoc, { viewColumn: vscode.ViewColumn.Two, preview: false });
-
-            if (originalEditor) {
-                this.applyDiffHighlights(
-                    originalEditor,
-                    newEditor,
-                    this.normalizeNewlines(originalContent),
-                    this.normalizeNewlines(r.content),
-                    lineEnding
-                );
-            }
-
-            const newDocText = newDoc.getText();
-            diffChunks.push({
-                range: new vscode.Range(newDoc.positionAt(0), newDoc.positionAt(0)),
-                newText: newDocText,
-                originalText: originalContent,
-                fullOriginalContent: originalContent,
-                filePath: r.path,
-                startOffset: 0,
-                endOffset: newDocText.length,
-                modifiedUri: newDoc.uri.toString()
-            });
+            await this.openFixReview(r.path, originalContent, rec, '', false);
             opened++;
         }
 
+        await vscode.commands.executeCommand('setContext', 'designfix.reviewActive', diffChunks.length > 0);
         codeLensChangeEmitter.fire();
 
         if (opened > 0) {
             vscode.window.showInformationMessage(
-                `DesignFix suggested a fix across ${opened} file(s). Review each tab and Accept or Reject Change.`
+                `DesignFix suggested a fix across ${opened} file(s). Review each diff tab and use Accept Fix / Reject Fix.`
             );
             if (explanation) {
-                vscode.window.setStatusBarMessage(`LLM explanation: ${explanation}`, 5000);
+                vscode.window.setStatusBarMessage(`LLM explanation: ${explanation}`, 8000);
             }
+        }
+
+        if (truncationWarnings.length > 0) {
+            vscode.window.showWarningMessage(
+                `DesignFix: possible truncated suggestion; original lines were kept (${truncationWarnings.join('; ')}).`
+            );
         }
 
         if (alreadySatisfied.length > 0) {
             vscode.window.showWarningMessage(
-                `DesignFix: ${alreadySatisfied.length} file(s) already match the suggested fix on disk (nothing to apply): ${alreadySatisfied.join(', ')}.`
+                `DesignFix: ${alreadySatisfied.length} file(s) already satisfied (only formatting differed): ${alreadySatisfied.join(', ')}.`
             );
         }
 

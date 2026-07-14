@@ -22,6 +22,16 @@
       {
         "command": "designfix.mineRules",
         "title": "Mine Rules"
+      },
+      {
+        "command": "designfix.acceptChange",
+        "title": "DesignFix: Accept Fix",
+        "icon": "$(check)"
+      },
+      {
+        "command": "designfix.rejectChange",
+        "title": "DesignFix: Reject Fix",
+        "icon": "$(close)"
       }
     ],
     "menus": {
@@ -30,6 +40,28 @@
           "when": "editorTextFocus",
           "command": "designfix.mineRules",
           "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "designfix.acceptChange",
+          "group": "navigation@1",
+          "when": "designfix.reviewActive"
+        },
+        {
+          "command": "designfix.rejectChange",
+          "group": "navigation@2",
+          "when": "designfix.reviewActive"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "designfix.acceptChange",
+          "when": "designfix.reviewActive"
+        },
+        {
+          "command": "designfix.rejectChange",
+          "when": "designfix.reviewActive"
         }
       ]
     }

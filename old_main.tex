@@ -1,0 +1,1161 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{comment}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{listings}
+\usepackage{url}
+\usepackage{balance}
+\usepackage{pifont}
+\usepackage{subfig}
+
+\usepackage{tikz}
+\newcommand{\circmark}[1]{%
+  \tikz[baseline=(char.base)]{
+    \node[shape=circle,draw=black!40,fill=black!10,inner sep=1.2pt,font=\small\bfseries] (char) {#1};}%
+}
+
+\newcommand{\pquote}[3]{%
+\vspace{2pt}
+\begin{quote}\small
+\textbf{#1} (\emph{#2}): \emph{``#3''}
+\end{quote}
+\vspace{2pt}
+}
+
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  numbers=none,
+  tabsize=2,
+  captionpos=b,           % caption below the listing
+  abovecaptionskip=5pt,  % space between frame and caption
+}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{DesignFix: Context-Augmented Repair of Design Rule Violations}
+
+\begin{comment}
+\author{
+\IEEEauthorblockN{Mainul Hossain}
+\IEEEauthorblockA{George Mason University\\
+mhossa6@gmu.edu}
+\and
+\IEEEauthorblockN{Thomas D. LaToza}
+\IEEEauthorblockA{George Mason University\\
+tlatoza@gmu.edu}
+}
+\end{comment}
+
+
+\maketitle
+
+\begin{abstract}
+Design rules capture constraints that developers must follow to ensure code remains consistent with design decisions. While tools exist to detect design rule violations, understanding why code violates a rule and determining how to fix it remains challenging, particularly in unfamiliar codebases. We propose DesignFix, an approach that applies large language models to assisting developers in interpreting and repairing design rule violations. DesignFix builds on automated design rule checking to extract violations along with contextual information from the codebase including rule descriptions, rule-satisfying examples from the same project, and surrounding file context. This context augmentation grounds the LLM's reasoning in project-specific patterns rather than relying on generic code knowledge. A two-step co-generative prompting strategy separates free-form reasoning from structured output generation, improving both fix quality and explanation accuracy. Fixes are presented through an interactive diff-based review workflow enabling developers to verify and accept or reject suggestions. Through a systematic evaluation of seven prompt variants across 9,450 model runs, we found that rule-following examples and a two step approach achieved the highest performance, with 90\% code fix success, 89\% explanation correctness, and 90\% surrounding code preservation. A within-subjects user study with 14 participants demonstrated that DesignFix significantly reduced task completion time and improved correctness, while significantly lowering cognitive workload across 5 NASA-TLX dimensions. Qualitative analysis revealed that DesignFix's primary value derives from precise codebase navigation rather than code generation, with participants spending 75\% less time locating relevant code, and that its verification affordances enabled developers to detect and recover from incorrect suggestions.
+
+\end{abstract}
+
+\begin{IEEEkeywords}
+design rules, large language models, software maintenance, code repair, developer tools
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Software development involves making design decisions that constrain how code should be written. These constraints, known as design rules, ensure that code remains consistent with the intended design and architecture~\cite{mehrpour2019active}. Design rules might specify that certain classes must implement particular methods, that specific annotations must be present, or that particular function calls must follow certain patterns. When developers violate these rules, the consequences can include code decay, inconsistent behavior, subtle bugs, or significant maintenance difficulties that compound over time.
+
+While static analysis tools can detect when code violates
+design rules~\cite{nachtigall2022usability}, understanding \textit{why} code violates a rule and determining \textit{how} to fix it remains a significant challenge. This challenge is particularly acute when developers work with unfamiliar codebases, where they may lack the contextual knowledge needed to interpret rules and identify appropriate fixes. Traditional documentation approaches often fall short: developers may miss relevant design decisions buried in wikis or comments, struggle to find examples of correct usage scattered across the codebase, or misinterpret the intended constraints due to ambiguous or incomplete explanations~\cite{mehrpour2019active}.
+
+\begin{comment}
+The problem is compounded by the nature of modern software development. Developers frequently join new teams, inherit legacy codebases, or contribute to open-source projects where they lack deep familiarity with the design decisions that shaped the code. In these situations, fixing a design rule violation requires not just identifying what is wrong, but understanding the underlying design intent and how to align the fix with existing patterns in the codebase. This process can involve examining multiple examples of code that satisfies the rule, tracing through class hierarchies, or understanding framework-specific conventions that may not be immediately obvious.
+\end{comment}
+
+Recent advances in large language models (LLMs) have demonstrated strong capabilities in code understanding and generation~\cite{peng2023impact}, with studies showing that AI coding assistants can sometimes significantly improve developer productivity~\cite{peng2023impact, liang2024survey}. This raises the possibility: could LLMs help developers understand and fix design rule violations?
+
+
+In this paper, we propose DesignFix, an approach that applies large language models to assisting developers in interpreting and repairing design rule violations when they are detected. Rather than simply flagging violations, DesignFix provides developers with explanations of why code violates a rule and suggests concrete fixes tailored to the specific codebase context. Our core contribution lies in systematically investigating what information and context should be provided to an LLM to enable it to effectively assist with design rule violation repair, and validating this approach through a controlled experiment.
+
+We conducted two complementary evaluations: a systematic prompt exploration across 9,450 LLM runs (Section~V) and a within-subjects user study with 14 participants (Section~VI). We addressed three research questions:
+
+\begin{itemize}
+\item \textbf{RQ1:} How proficient are large language models in interpreting and responding to different types of coding prompts, and what limitations do they exhibit?
+\item \textbf{RQ2:} How effective are LLMs in suggesting accurate code modifications and providing comprehensible explanations across diverse codebases, and what factors influence their performance?
+\item \textbf{RQ3:} How does DesignFix affect developer  performance fixing design rule violations in an unfamiliar codebase?
+\end{itemize}
+
+
+\begin{comment}
+To answer these questions, we conducted two complementary evaluations. First, we systematically explored different prompting strategies with two versions of gpt-4o, iteratively refining prompts to understand what context and formatting produces the most accurate and useful responses. We evaluated seven prompt variants across 45 design rule violations from two distinct codebases, measuring code fix success rate, Explanation Pass Rate, and Surrounding Code Pass Rate. In total, this evaluation involved 9,450 individual model runs across different prompt types, model versions, and temperature settings.
+
+Second, we conducted a within-subjects user study with 14 participants who had varying levels of software engineering experience, ranging from 0 to 12 years. Each participant fixed one design rule violation without LLM assistance and another with DesignFix, allowing us to directly compare task performance, cognitive workload, and subjective experience.
+\end{comment}
+
+\begin{comment}
+Our results show that: (1) a two-step co-generative prompting approach significantly outperforms single-shot prompts, achieving 90\% code fix success and 89\% explanation correctness; (2) participants using DesignFix completed tasks significantly faster (10.0 vs. 15.71 minutes, representing a 36\% time reduction) with substantially higher correctness (93\% vs. 43\%); and (3) DesignFix reduced cognitive workload across all NASA-TLX dimensions, with particularly large reductions in mental demand, effort, and frustration.
+\end{comment}
+
+The contributions of this paper are:
+
+\begin{itemize}
+\item \textbf{DesignFix}, a navigation-first approach for assisting developers with design rule violation repair that prioritizes precise code location and pattern identification over fully automated fixes
+\item \textbf{Design principles for verification-supported AI assistance}, demonstrating how explanation-code separation and review workflows enable appropriate trust calibration and error recovery
+\item \textbf{Systematic investigation} of prompting strategies for design rule violation repair, identifying that a two-step co-generative approach with rule-following examples and surrounding context achieves optimal performance
+\item \textbf{Empirical evidence} from a controlled experiment with 14 participants demonstrating both efficiency gains (36\% time reduction, 50\% improvement in correctness) and  mechanisms behind these improvements
+\end{itemize}
+
+\section{Background: Design Rules}
+
+When writing code, developers make design decisions that constrain how software should be implemented. A design decision captures both a choice and the rationale explaining why that choice was made. A \textit{design rule} captures the specific constraint imposed by a design decision, expressed in a form that can be checked against code~\cite{mehrpour2019active}. Unlike general coding conventions or style guidelines, design rules encode project-specific design decisions that reflect how a particular system is intended to work.
+
+\subsection{Structure of Design Rules}
+
+Design rules typically follow an IF/THEN structure: the IF clause specifies a \textit{quantifier} describing when the rule applies, and the THEN clause specifies a \textit{constraint} describing what must be true~\cite{mehrpour2019active}. For example, a design rule might state: ``IF a class is a subclass of Microtask THEN it must have a field representing a reference to its owning Artifact.'' This rule applies to all Microtask subclasses (quantifier) and requires a specific field declaration (constraint). Unlike method requirements that can be enforced through abstract declarations, this structural constraint cannot be expressed through language mechanisms alone. What distinguishes design rules from informal documentation is that they can be automatically checked against code. When a developer writes code that matches the quantifier but fails to satisfy the constraint, the rule checker can identify this as a violation and alert the developer. This ensures that design decisions are consistently followed across the codebase.
+
+\subsection{Types of Design Rules}
+
+Design rules vary in scope and complexity. Some manifest as statement-level constraints, such as requiring that mutable data fields in ViewModels remain private to prevent UI components from accidentally modifying observed data:
+
+\begin{lstlisting}[language=Java,caption={Statement-level design rule example}]
+// Rule: MutableLiveData must not be exposed 
+// publicly from ViewModels
+
+// Violation:
+public MutableLiveData<Object> orderData 
+    = new MutableLiveData<>();
+
+// Correct:
+private MutableLiveData<Object> userData 
+    = new MutableLiveData<>();
+public LiveData<Object> getUserData() {
+    return userData;
+}
+\end{lstlisting}
+
+This rule enforces encapsulation by ensuring that UI components can only observe data changes through immutable \texttt{LiveData}, while the \texttt{ViewModel} retains exclusive control over mutations through the private \texttt{MutableLiveData} field.
+
+
+Other rules constrain class or method declarations. For example, a rule can ensure that data classes in a Google App Engine context are properly annotated for persistence:
+
+\begin{lstlisting}[language=Java,caption={Annotation-based design rule example}]
+// Rule: Artifact subclasses must be 
+// annotated @Entity
+@Entity
+@Subclass(index=true)
+public class ADT extends Artifact { ... }
+\end{lstlisting}
+
+This ensures that all classes that can be stored in the datastore are properly configured for serialization and indexing.
+
+Other rules express higher-level architectural constraints. For instance, in a sharded architecture where commands are executed across multiple servers, operations might need to be handled through specific command patterns:
+
+\begin{lstlisting}[language=Java,caption={Architectural design rule example}]
+// Rule: Command static methods must 
+// construct the right Command subclass
+public abstract class FunctionCommand 
+    extends Command {
+  public static FunctionCommand create(...) {
+    return new Create(...);
+  }
+  protected static class Create 
+      extends FunctionCommand { }
+}
+\end{lstlisting}
+
+\section{Related Work}
+
+\subsection{Static Analysis for Defect Detection and Repair}
+
+Static analysis tools are central to software quality assurance, yet a systematic evaluation found that most offer little guidance on resolving flagged issues~\cite{nachtigall2022usability}. False positives remain a significant adoption barrier~\cite{guo2023falsepositive}, and SonarQube studies reveal that many violations go unresolved, with severity classifications not always aligned with actual fault-proneness. Architecture erosion, where implementations diverge from designs through conformance violations and structural decay~\cite{li2022erosion}, is related to but distinct from code smells increasingly targeted through deep learning~\cite{liu2023deepsmell}. Sorald~\cite{etemadi2022sorald} employs template-based AST metaprogramming to fix 65\% of qualifying SonarQube violations, though each rule requires a manually engineered transformation. CORE~\cite{wadhwa2024core} uses a proposer-ranker dual-LLM architecture achieving 76.8\% with less per-rule engineering. ActiveDocumentation~\cite{mehrpour2019active} expresses design decisions as machine-checkable rules evaluated via XPath queries, providing real-time IDE feedback, though it focuses on detection rather than repair. DesignFix builds on this rule-checking foundation to generate fixes via LLM for arbitrary project-specific rules (unlike template-bound Sorald) and prioritizing developer verification over full automation (unlike CORE), reflecting research on validation support and user autonomy in building tool trust~\cite{johnson2023trust}.
+
+\subsection{LLM-Based Automated Program Repair}
+
+LLMs have substantially advanced automated program repair (APR). Xia and Zhang~\cite{xia2022alpharepair} demonstrated zero-shot APR via cloze-style infilling without fine-tuning on bug-fix history, and a subsequent multi-model study~\cite{xia2023era} established that LLMs outperform traditional techniques. ChatRepair~\cite{xia2024chatrepair} introduced conversational repair that iteratively incorporates test-failure feedback. SRepair~\cite{xiang2024srepair} uses a dual-LLM framework where one model generates NL repair suggestions and another produces patches.  RepairAgent~\cite{bouzenia2025repairagent} autonomously plans repair actions through dynamically updated prompts.  Joshi et al.~\cite{joshi2023ring} decompose repair into localization, transformation, and ranking. Context augmentation has proven critical: RAP-Gen~\cite{wang2023rapgen} retrieves similar bug-fix pairs through a hybrid retriever, and InferFix~\cite{jin2023inferfix} pairs a static analyzer with retrieval-augmented LLM prompting, deployed at Microsoft.
+DesignFix addresses a distinct problem: repairing design rule violations requiring project-specific architectural understanding rather than localized bug fixes. Our two-step prompting shares SRepair's explain-then-fix philosophy using a single model, and our context augmentation parallels InferFix but retrieves rule-satisfying examples rather than historical fixes.
+
+\subsection{LLM-Assisted Developer Tools and Human-AI Interaction}
+
+Surveys identify key usability challenges with AI coding assistants, including difficulty evaluating correctness~\cite{liang2024survey}. Barke et al.~\cite{barke2023grounded} identified \emph{acceleration} and \emph{exploration} interaction modes with significant validation costs. Perry et al.~\cite{perry2023insecure} found AI access led to less secure code with more vulnerabilities, despite higher user confidence. Russo~\cite{russo2024navigating} found workflow compatibility to be the most critical adoption driver, while Al Haque et al.~\cite{alhaque2025evolution} documented how AI assistants reshape information-seeking behavior. For IDE integration, Vaithilingam et al.~\cite{vaithilingam2023intellicode} evaluated 19 interface designs, finding diff-like views effective for multi-line changes. Peng et al.~\cite{peng2023impact} measured 55.8\% speed improvements with Copilot. DesignFix's interactive review workflow is informed by these findings.
+
+\subsection{Prompting Strategies for Code Tasks}
+
+Li et al.~\cite{li2024scot} proposed Structured Chain-of-Thought prompting, which uses programming structures as intermediate reasoning steps, and Jiang et al.~\cite{jiang2024selfplanning} introduced a plan-then-implement approach improving over direct generation by up to 25.4\%, both closely related to DesignFix's two-step strategy. Chen et al.~\cite{chen2024selfdebug} showed that explanation generation alone can help LLMs identify errors in their own code, and Madaan et al.~\cite{madaan2023selfrefine} introduced iterative self-refinement. For project-specific knowledge, Zhou et al.~\cite{zhou2023docprompting} demonstrated that retrieved documentation improves code generation particularly for unseen APIs, and Nashid et al.~\cite{nashid2023cedar} showed that retrieval-based demonstration selection outperforms random selection. DesignFix's use of rule-satisfying examples from the same codebase follows this retrieval-augmented paradigm.
+
+
+
+\section{DesignFix: System Design}
+
+DesignFix assists developers in repairing design rule violations through three main steps. First, when a violation is detected, DesignFix extracts contextual information including the rule description, rule-satisfying examples from the codebase, and surrounding code. Second, this context is fed into a two-step LLM prompting pipeline that generates both an explanation and a suggested code fix. Third, the fix is presented to the developer through an interactive diff-based review workflow. The following subsections describe each stage in detail.
+
+\subsection{System Architecture}
+
+\begin{comment}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{images/architecture_2.pdf}
+    \caption{DesignFix data flow pipeline. For each detected violation, 
+the system extracts contextual information and passes it through a 
+two-step LLM pipeline to produce a structured code fix.}
+\label{fig:architecture}
+\end{figure}
+    
+\end{comment}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{images/DesignFix_System_Diagram_v4.png}
+    \caption{DesignFix pipeline. \protect \circmark{A} Design rules expressed as XPath queries detect violations in the XML AST, producing sets of rule violations and examples of the rule being followed.   \protect\circmark{B} Surrounding context is extracted by retaining the violation's enclosing method body and stripping sibling methods to signatures. \protect\circmark{C} Context elements populate a prompt template processed through a two-step LLM pipeline separating free-form reasoning from structured JSON extraction. \protect\circmark{D} The developer reviews the suggested fix and explanation via a side-by-side diff view before accepting or rejecting.}
+    \label{fig:architecture}
+\end{figure*}
+
+
+Figure~\ref{fig:architecture} illustrates the DesignFix architecture. DesignFix operates as an IDE-integrated pipeline. When a developer edits code, the system converts source files to an XML representation and evaluates them against design rules using XPath queries. Specifically, DesignFix uses srcML~\cite{collard2013srcml} to convert 
+Java source files into an XML abstract syntax tree (AST) representation 
+that preserves both syntactic structure and source-level formatting. 
+Design rules are expressed as XPath queries over this XML AST, enabling 
+precise identification of code elements that match rule quantifiers and 
+evaluation of whether those elements satisfy rule constraints. Upon detecting a violation, the context extraction module assembles the relevant information — the rule description, a rule-satisfying example from the same codebase, the violating code, and the surrounding file context — and passes it to the two-step LLM pipeline described below. The resulting fix and explanation are then presented to the developer through an interactive diff-based review interface.
+
+\subsection{Context Extraction for LLM Prompting}
+
+A central challenge in leveraging LLMs for design rule repair is 
+determining what prompt information to include in the prompt. Through iterative 
+experimentation (Section~\ref{sec:eval1}), we identified 
+five types of context that improve LLM performance:
+
+\textbf{Design Rule Description.} The natural language description of 
+the design rule, explaining what constraint is imposed and when it 
+applies. This provides the LLM with semantic understanding of the 
+rule's intent.
+
+\textbf{Rule-Satisfying Example.} A code snippet from the same codebase 
+that correctly follows the rule, along with its file path, demonstrating 
+the expected pattern. We found that providing a project-specific example, 
+rather than a generic one, substantially improved fix quality by exposing 
+local conventions and naming patterns.
+
+\textbf{Violation Snippet.} The specific lines of code (typically 1--2 
+lines) that trigger the design rule violation, as identified by the 
+XPath query evaluation. %This snippet pinpoints what is wrong without 
+including extraneous code. 
+By presenting the violation separately, the LLM can clearly distinguish the fix target from the structural context around it.
+
+\textbf{Surrounding Context.} The enclosing class and method structure 
+around the violation, extracted from the XML AST by traversing upward 
+from the violation node. The extraction strategy varies by the type of 
+code element violated:
+
+\begin{itemize}
+\item \textit{Statements within a method:} The full body of the 
+enclosing method is retained, while sibling methods in the same class 
+are reduced to their signatures (bodies removed). Field declarations 
+and the class declaration are preserved.
+\item \textit{Class-level elements} (e.g., fields, annotations): The 
+enclosing class is returned with all method bodies stripped to 
+signatures only, preserving the structure of the class.
+\item \textit{Static utility classes:} The entire class is included, 
+as static classes tend to be compact with interdependent methods.
+\end{itemize}
+
+\noindent This strategy provides the LLM with sufficient structural 
+context---the class shape, field declarations, and method 
+signatures---while filtering out irrelevant implementation details from 
+sibling methods. %Listing~\ref{lst:context_extraction} in the Appendix illustrates this 
+%extraction for a statement-level violation.
+\begin{comment}
+\begin{lstlisting}[language=Java,caption={Surrounding context 
+extraction example. For a violation inside \texttt{execute()}, the 
+extracted context retains the full method body and class structure 
+but strips sibling method bodies to signatures 
+only.},label={lst:context_extraction}]
+// Full class (original)
+public class CreateFunction extends Command {
+  private String name;
+  private String description;
+  
+  public void execute() {
+    // ... 15 lines (contains violation)
+  }
+  
+  public void validate() {
+    // ... 10 lines (unrelated)
+  }
+  
+  public static CreateFunction create() {
+    // ... 5 lines (unrelated)
+  }
+}
+
+// Extracted surrounding context
+public class CreateFunction extends Command {
+  private String name;
+  private String description;
+  
+  public void execute() {
+    // ... 15 lines (full body retained)
+  }
+  
+  public void validate() { ... }
+  
+  public static CreateFunction create() { ... }
+}
+\end{lstlisting}    
+\end{comment}
+
+
+\textbf{File Context.} The complete file containing the violation, 
+enabling the LLM to understand how the fix should integrate with 
+existing code, including package declarations, import statements, and 
+class definitions.
+
+\subsection{Two-Step Co-Generative Prompting}
+
+Our experiments revealed that a two-step prompting approach quantitatively outperforms single-shot prompts. This separates free-form reasoning from structured output generation, yielding higher-quality fixes and reliable parsing.
+
+\textbf{Step 1: Unstructured Reasoning.} The first prompt contains the four context elements described above and instructs the model to produce a free-form response explaining the violation and a fix. The prompt explicitly encourages the model to ``take as much time as needed'' to reason through the problem without worrying about output format. This step uses a temperature of 0.50, which our evaluation (Section~\ref{sec:eval1}) identified as optimal for balancing reasoning quality and consistency.
+
+Figure~\ref{fig:architecture} shows the structure of the Step~1 
+prompt. Each context element is enclosed in explicitly labeled 
+delimiters, enabling the model to distinguish between the file to be 
+modified, the structural context around the violation, and the specific 
+code that must change.
+\begin{comment}
+\begin{lstlisting}[caption={Step 1 prompt template with labeled 
+context sections.},label={lst:prompt_template},
+basicstyle=\ttfamily\scriptsize]
+You are assisting with enforcing the following 
+design rule:
+{rule description}
+
+Here is a code example that follows the rule:
+{rule-satisfying example}
+Example file path: {example file path}
+
+<<<ORIGINAL_FILE_PATH>>>
+{violation file path}
+<<<END_ORIGINAL_FILE_PATH>>>
+
+<<<ORIGINAL_FILE_CONTENT>>>
+{full file content}
+<<<END_ORIGINAL_FILE_CONTENT>>>
+
+Here is the surrounding class/method structure 
+around the violation, showing the enclosing context:
+<<<SURROUNDING_CONTEXT>>>
+{extracted surrounding context}
+<<<END_SURROUNDING_CONTEXT>>>
+
+<<<VIOLATION_SNIPPET>>>
+{violation snippet}
+<<<END_VIOLATION_SNIPPET>>>
+
+Rewrite the original file so it satisfies the rule 
+while preserving every unrelated line verbatim.
+\end{lstlisting}
+    
+\end{comment}
+The explicit separation between 
+\texttt{SURROUNDING\_CONTEXT} and \texttt{VIOLATION\_SNIPPET} is a 
+deliberate design choice. When surrounding code was included without 
+clear delineation from the violation, we observed that the model was 
+more likely to make unintended modifications to context code. The 
+labeled delimiters signal to the model that the surrounding context 
+is provided for understanding, not for modification.
+
+
+\textbf{Step 2: Structured Extraction.} The second prompt feeds back both the original prompt and the unstructured response, asking the model to restructure the answer into JSON with three fields: \texttt{\{explanation, code, fileName\}}. This step uses a lower temperature (0.2) to ensure precise, parseable output.
+This separation allows the model to reason freely without formatting constraints, provides implicit self-review during restructuring, and ensures reliable output.
+
+
+\subsection{Interactive Suggestion and Acceptance Workflow}
+
+Figures~\ref{fig:ui_a}--\ref{fig:ui_b} illustrate this workflow using
+a concrete example from the CrowdCode codebase, where a DTO class is
+missing a required zero-argument constructor.
+Upon receiving the structured JSON response, the system displays the suggestion in a dedicated UI panel showing the \textbf{Suggested Fix Location} (file path), the \textbf{Suggested Fix} (code), and the \textbf{Explanation} of changes. The developer reviews this information and may click \textbf{Accept Fix} to proceed.
+Clicking Accept Fix triggers a side-by-side diff view. The left tab displays the original file containing the violation.  The right tab shows the fix highlighted with a green background within  the surrounding code. This presentation enables developers to visually compare the original code with proposed changes. Inline action buttons in the right tab offer two actions: \textbf{Accept Change} automatically applies the fix to the original file, while \textbf{Reject Change} dismisses the suggestion and closes the diff view.
+This two-stage workflow — first reviewing the explanation and code then confirming through a visual diff — provides multiple checkpoints for verification before codebase affecting changes.
+
+% === FIGURE 1: 1_anno (single column) ===
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{images/1_anno.png}
+  \caption{A developer encounters a design rule violation.
+  The rule checker surfaces
+  {\ding{192}}~the rule description explaining the IF/THEN constraint,
+  {\ding{193}}~categorization tags for the violation type,
+  {\ding{194}}~the specific code snippets that violate the rule, and
+  {\ding{195}}~a Fix button that invokes the DesignFix LLM pipeline.}
+  \label{fig:ui_a}
+\end{figure}
+
+% === FIGURE 2: 2_anno (single column) ===
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{images/2_anno_alt.png}
+  \caption{After clicking Fix, DesignFix returns a structured
+  suggestion showing
+  {\ding{192}}~the target file path,
+  {\ding{193}}~the suggested code fix with additions marked
+  by~\texttt{+},
+  {\ding{194}}~a natural language explanation grounded in
+  project-specific context, and
+  {\ding{195}}~an Accept Fix button to proceed to review.}
+  \label{fig:ui_b}
+\end{figure}
+
+\begin{comment}
+    
+%```latex
+% === FIGURE 3: 3_anno only (single column) ===
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{images/3_anno.png}
+  \caption{Clicking Accept Fix opens a side-by-side diff view
+  where the developer compares
+  {\ding{192}}~the original file on the left with
+  {\ding{193}}~the suggested fix highlighted in green on the right,
+  and uses {\ding{194}}~inline Accept/Reject controls to commit
+  or dismiss the change. Once accepted, the fix is merged directly
+  into the codebase, completing the repair workflow.}
+  \label{fig:ui_review_accept}
+\end{figure}
+%```
+\end{comment}
+
+
+\section{Evaluation I: Prompting Strategies}
+\label{sec:eval1}
+
+To understand how effectively LLMs can assist with design rule violation repair, we systematically investigated different prompting strategies and measured their effectiveness across multiple metrics. This evaluation addresses RQ1 and RQ2.
+
+\subsection{Methodology}
+
+\textbf{Prompt Development.} We developed prompts iteratively, starting with a minimal baseline and progressively adding context and constraints, as discussed in Table ~\ref{tab:prompts}. We developed prompts using a subset of three design rule violations from one codebase (CrowdCode), then evaluated the finalized prompts on the full dataset. These three development violations were included in the 45-violation evaluation dataset to maximize data usage. This development/evaluation split ensured that our prompt refinements generalized beyond the specific examples used during development.
+
+\begin{table}[t]
+\caption{Prompt variants evaluated in LLM proficiency study. Each variant builds incrementally on the previous. The "+" notation shows each prompt builds on the previous, eliminating redundant descriptions}
+\label{tab:prompts}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l p{0.55\columnwidth} l}
+\toprule
+\textbf{Prompt} & \textbf{Description} & \textbf{Tests} \\
+\midrule
+Baseline & Rule description + violating code only & Minimal context \\
+Prompt 1 & + Output only fix lines (no prose) & Succinct patches \\
+Prompt 2 & + Rule-satisfying example from codebase & Positive examples \\
+Prompt 3 & + JSON output \{explanation, code\} & Structured output \\
+Prompt 4 & + Surrounding class/method structure as separately labeled 
+input section & Context integration \\
+%Prompt 4 & + Surrounding code as input context & Context integration \\
+Prompt 5 & + Include surrounding code in output & Context preservation \\
+\midrule
+Final & Two-step: free-form reasoning $\rightarrow$ JSON & Reasoning/format separation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\textbf{Dataset.} We gathered design rules and corresponding violations from two distinct codebases to ensure generalizability:
+
+\begin{itemize}
+\item \textit{CrowdCode:} An open-source crowdsourcing platform with 8 design rules covering command patterns, entity persistence, and artifact relationships. This codebase uses Google App Engine with the Objectify framework.
+\item \textit{Android Architectural Rules:} A set of 7 rules derived from Android best practices covering data transfer objects (DTOs), repository patterns, and persistence patterns. These reflect modern Android design recommendations.
+\end{itemize}
+
+For each of the 15 design rules, we obtained or constructed 3 instances of violating code, resulting in 45 violation examples. Violations were selected to represent realistic developer mistakes, including missing annotations, incorrect method signatures, and improper class relationships.
+
+\textbf{LLM Configurations.} We used gpt-4o versions gpt-4o-2024-08-06 (hereafter gpt-4o-aug) and gpt-4o-2024-11-20 (hereafter gpt-4o-nov). To account for nondeterminism, we ran each prompt with three temperature settings (0.5, 0.75, 1.0) and generated 5 outputs per configuration, yielding up to 15 attempts per scenario. For the final two-step prompt, while the evaluation tested all three temperatures for the reasoning step, we adopted temperature 0.2 for the structuring step to maximize JSON formatting reliability. In total:
+
+45 violations $\times$ 7 prompt types $\times$ 2 model versions $\times$ 3 temperatures $\times$ 5 trials = 9,450 LLM runs.
+
+\begin{comment}
+\textbf{LLM Configurations.} We used OpenAI's gpt-4o models, comparing two versions: gpt-4o-2024-11-20 and gpt-4o-2024-08-06. Comparing versions helps us understand whether prompt effectiveness varies across model updates. To account for model nondeterminism, we ran each prompt with three temperature settings (0.5, 0.75, 1.0) and generated 5 outputs per configuration. For the final prompt, while our evaluation tested temperatures 0.5, 0.75, and 1.0 for the reasoning step to determine optimal creativity/precision balance, we use a lower temperature (0.2) for the structuring step in production to maximize JSON formatting reliability—a parameter choice validated through preliminary pilot testing. This resulted in up to 15 attempts per scenario, enabling statistical analysis of reliability. These temperature values were selected because they span the commonly recommended range for code generation tasks. In total, our experiment involved:
+
+45 violations $\times$ 7 prompt types $\times$ 2 model versions $\times$ 3 temperatures $\times$ 5 trials = 9,450 LLM runs. For the two model versions, we evaluated two gpt-4o models.
+Throughout this paper, we will refer 
+\begin{itemize}
+    \item gpt-4o-2024-08-06 as gpt-4o-aug  and
+    \item gpt-4o-2024-11-20 as gpt-4o-nov
+\end{itemize} 
+\end{comment}
+
+\textbf{Evaluation Metrics.} We assessed LLM suggestions along three dimensions:
+
+\textit{Code Fix Success Rate:} Whether the suggested fix actually resolves the design rule violation. We applied each fix to the codebase and verified that the rule checker no longer flagged a violation. This metric captures functional correctness.
+
+\textit{Explanation Correctness (Explanation Pass Rate):} Whether the explanation correctly identifies the violation cause and aligns with the changes. This metric captures whether the explanation would help a developer understand the violation.
+
+\textit{Surrounding Code Pass Rate:} Whether the fix integrates cleanly with surrounding code without introducing syntax errors, broken references, or unintended modifications. This captures whether the fix can be applied without side effects.
+
+\subsection{Results}
+
+\begin{comment}
+\begin{table}[t]
+\caption{Code Fix Success Rate (\%)}
+\label{tab:code_fix}
+\centering
+\begin{tabular}{llccc}
+\toprule
+\textbf{Prompt} & \textbf{Model} & \textbf{0.5} & \textbf{0.75} & \textbf{1.0} \\
+\midrule
+Baseline & gpt-4o-nov & 62 & 58 & 55 \\
+Baseline & gpt-4o-aug & 64 & 61 & 57 \\
+Prompt 1 & gpt-4o-nov & 68 & 65 & 62 \\
+Prompt 1 & gpt-4o-aug & 70 & 67 & 64 \\
+Prompt 2 & gpt-4o-nov & 76 & 72 & 71 \\
+Prompt 2 & gpt-4o-aug & 77 & 74 & 74 \\
+Prompt 3 & gpt-4o-nov & 76 & 73 & 72 \\
+Prompt 3 & gpt-4o-aug & 74 & 74 & 71 \\
+Prompt 4 & gpt-4o-nov & 77 & 74 & 70 \\
+Prompt 4 & gpt-4o-aug & 78 & 75 & 72 \\
+Prompt 5 & gpt-4o-nov & 80 & 78 & 72 \\
+Prompt 5 & gpt-4o-aug & 80 & 76 & 79 \\
+\midrule
+Final & gpt-4o-nov & \textbf{88} & 88 & 86 \\
+Final & gpt-4o-aug & \textbf{90} & 89 & 87 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\end{comment}
+
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\linewidth]{images/codefix_passrate.png}
+  \caption{Code Fix Pass Rate across 5 prompt variations and 3 temperature parameters. Results from Baseline prompt and Prompt 1 are not shown for the sake of brevity. Labels are abbreviated as P2--P5 for Prompts 2--5, F for Final, with \textit{nov} and \textit{aug} denoting the GPT-4o-november and GPT-4o-august model variants respectively.
+  }
+  \label{img:code_fix}
+\end{figure}
+
+\textbf{Code Fix Success Rate.} Figure ~\ref{img:code_fix} presents code fix success rates across prompt variants, temperatures, and model versions. The Baseline prompt achieved only 62-64\% success at temperature 0.5, establishing a lower bound for comparison. Adding code-only output constraints (Prompt 1) improved success to 68-70\%, and adding rule-following examples (Prompt 2) further improved success to 76-77\%.
+The Final Prompt (two-step co-generative) achieved the highest success rates across all conditions. At temperature 0.5, the Final Prompt achieved 88\% success with gpt-4o-nov and 90\% with gpt-4o-aug. This represents a 26-28 percentage point improvement over the Baseline and an 8-10 point improvement over the best single-shot variant (Prompt 5).
+
+\begin{comment}
+Lower temperatures generally produced better results, with success rates declining by 2-5 percentage points as temperature increased from 0.5 to 1.0. This aligns with expectations that lower temperatures produce more deterministic, focused outputs suitable for code generation tasks.
+\end{comment}
+
+\begin{comment}
+\begin{table}[t]
+\caption{Explanation Pass Rate (\%)}
+\label{tab:explanation}
+\centering
+\begin{tabular}{llccc}
+\toprule
+\textbf{Prompt} & \textbf{Model} & \textbf{0.5} & \textbf{0.75} & \textbf{1.0} \\
+\midrule
+Prompt 3 & gpt-4o-nov & 76 & 76 & 73 \\
+Prompt 3 & gpt-4o-aug & 77 & 77 & 72 \\
+Prompt 4 & gpt-4o-nov & 75 & 74 & 70 \\
+Prompt 4 & gpt-4o-aug & 76 & 75 & 71 \\
+Prompt 5 & gpt-4o-nov & 82 & 74 & 80 \\
+Prompt 5 & gpt-4o-aug & 84 & 76 & 76 \\
+\midrule
+Final & gpt-4o-nov & \textbf{89} & 87 & 85 \\
+Final & gpt-4o-aug & 88 & 87 & 82 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\end{comment}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\linewidth]{images/explanation_passrate.png}
+  \caption{Explanation Pass Rate across 3 prompt variations and 3 temperature parameters. As prompts older than Prompt 3 were not assessed on this metric, they are omitted.}
+  \label{img:explanation_passrate}
+\end{figure}
+
+\textbf{Explanation Pass Rate.} Figure~\ref{img:explanation_passrate} presents explanation pass rates for prompts that generated explanations (Prompts 3-5 and Final). The Final Prompt achieved 89\% explanation correctness with gpt-4o-nov at temperature 0.5, compared to 76-77\% for Prompt 3. The two-step approach helped the model produce more coherent and accurate explanations by allowing it to first reason through the problem in natural language before formatting the response.
+
+We observed that incorrect explanations fell into several categories: misidentifying the specific rule being violated (18\% of errors), correctly identifying the rule but incorrectly explaining why the code violated it (42\%), and providing explanations that did not match the suggested fix (40\%). The two-step approach reduced all three error types, with the largest reduction in explanation-fix mismatches.
+
+\begin{comment}
+\begin{table}[t]
+\caption{Surrounding Code Pass Rate (\%)}
+\label{tab:surrounding}
+\centering
+\begin{tabular}{llccc}
+\toprule
+\textbf{Prompt} & \textbf{Model} & \textbf{0.5} & \textbf{0.75} & \textbf{1.0} \\
+\midrule
+Prompt 4 & gpt-4o-nov & 76 & 72 & 70 \\
+Prompt 4 & gpt-4o-aug & 86 & 83 & 72 \\
+Prompt 5 & gpt-4o-nov & 80 & 75 & 80 \\
+Prompt 5 & gpt-4o-aug & 78 & 81 & 79 \\
+\midrule
+Final & gpt-4o-nov & \textbf{90} & 88 & 86 \\
+Final & gpt-4o-aug & 89 & 85 & 85 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\end{comment}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\linewidth]{images/surrounding_code_passrate.png}
+  \caption{Surrounding Code pass rate across 3 prompt types, 3 temperature variations and 2 models}
+  \label{img:surrounding_passrate}
+\end{figure}
+
+\textbf{Surrounding Code Pass Rate.} Figure~\ref{img:surrounding_passrate} presents surrounding code pass rates, measured for prompts that output surrounding context (Prompts 4, 5, and Final). The final prompt achieved 90\% at temperature 0.5 with gpt-4o-nov, substantially outperforming Prompts 4 (76\%) and 5 (80\%).
+This metric proved important because earlier prompts sometimes made unintended modifications to surrounding code when asked to include it in the output. Common issues included removing necessary import statements, renaming variables to ``improve'' code style, and adding comments that were not requested. The two-step approach reduced these issues, likely because the restructuring step encouraged the model to focus on extracting the fix rather than regenerating surrounding code.
+
+\subsection{Key Findings}
+
+\textbf{Finding 1: Rule-following examples substantially improve fix quality.} Providing an example of code that  follows the design rule (Prompt 2 onward) improved success rates by 8-13 percentage points over the code-only approach. The example serves as a template that the model can adapt to the specific violation context. Examples from the same codebase were more effective than generic examples, likely because they demonstrate project-specific conventions such as naming patterns, import structures, and framework-specific idioms. %For the CrowdCode rules involving Objectify annotations, examples showing the exact annotation syntax and placement were critical for producing correct fixes.
+
+\textbf{Finding 2: Structured output requires careful prompting.} Requesting JSON output (Prompt 3) sometimes led to format deviations or extra text outside the JSON structure in 15\% of cases. Common issues included markdown formatting around JSON blocks, explanatory preambles before the JSON, and incomplete JSON due to token limits. The two-step approach mitigated this by separating reasoning from formatting, reducing format errors to under 3\%. This suggests that constraining output format early in the generation process interferes with the model's reasoning capabilities.
+
+\textbf{Finding 3: Surrounding context improves fix integration when 
+explicitly separated from the violation.} Providing surrounding code 
+as input (Prompt~4) helped the model understand structural context and 
+produce fixes that integrated correctly, improving integration success 
+by 3--14 percentage points across model versions. When 
+surrounding context was not clearly delineated from the violation 
+code, the model sometimes made unintended modifications: renaming 
+variables to ``improve'' code style (in 12\% of cases), adding 
+unsolicited comments (8\%), or refactoring unrelated code (4\%). 
+Introducing explicitly labeled delimiters 
+(\texttt{<<<SURROUNDING\_CONTEXT>>>} and 
+\texttt{<<<VIOLATION\_SNIPPET>>>}) reduced unintended modification 
+rates from 24\% to 10\% by signaling that surrounding code is 
+provided for comprehension, not for modification. The two-step 
+approach further reduced this rate by encouraging the model to 
+extract only the relevant fix from its initial reasoning.
+
+
+%\textbf{Finding 3: Surrounding context is a double-edged sword.} Providing surrounding code as input (Prompt 4) helped the model understand context and produce fixes that integrated correctly, improving integration success by 3-14 percentage points across model versions, from Prompt 4 to the final prompt. However, requesting surrounding code in the output sometimes led to unintended modifications: the model would ``improve'' variable names, add unsolicited comments, or refactor unrelated code. The two-step approach reduced unintended modification rates from 24\% to 10\% by encouraging the model to extract only the relevant fix from its initial reasoning.
+
+\textbf{Finding 4: The two-step approach consistently outperforms single-shot prompts.} The Final Prompt improved over Prompt 5 by 8-10 points for code fix success, 5-7 for Explanation Pass Rate, and 10-12 for Surrounding Code Pass Rate-likely because it removes formatting pressure during reasoning and provides implicit self-review.
+%\textbf{Finding 4: The two-step approach consistently outperforms single-shot prompts.} Across all metrics and conditions, the Final Prompt achieved the best results. The improvement over Prompt 5 (the best single-shot variant) was 8-10 percentage points for code fix success, 5-7 points for explanation correctness, and 10-12 points for surrounding code preservation. We hypothesize that the two-step approach works because it (a) removes formatting pressure during the reasoning phase, (b) provides a self-review opportunity during restructuring, and (c) allows the model to use chain-of-thought reasoning naturally before producing structured output.
+
+\textbf{Finding 5: Lower temperatures produce better, more consistent results.} Temperature 0.5 consistently outperformed higher temperatures across all metrics, with improvements of 2-5 percentage points over temperature 1.0. Additionally, the variance in results decreased at lower temperatures, making outcomes more predictable. At temperature 0.5, the standard deviation of success rates across trials was 3.2\%, compared to 7.8\% at temperature 1.0. The trade-off is slightly higher latency from two API calls, which proved acceptable in practice (adding 3-5 seconds to response times).
+
+\begin{comment}
+\textbf{Finding 6: Model version affects reliability but not peak performance.} gpt-4o-aug and gpt-4o-nov achieved similar peak performance with the Final Prompt (90\% vs. 88\% code fix success at temperature 0.5). However, gpt-4o-nov showed more consistent behavior across temperature settings, with smaller performance degradation at higher temperatures. This suggests that prompt engineering strategies may need periodic re-evaluation as model versions are updated.
+\end{comment}
+
+\section{Evaluation II: User Study}
+
+To understand how DesignFix affects developer task performance in practice, we conducted a within-subjects user study where participants fixed design rule violations with and without LLM assistance. This evaluation addresses RQ3.
+
+\subsection{Methodology}
+
+\textbf{Participants.} We recruited 14 participants with diverse software engineering backgrounds through academic and professional networks. The cohort included PhD students in Computer Science (n=10), professional software engineers (n=3), and a recent CS graduate (n=1). Their specializations spanned software development, machine learning and NLP, network security, VR development, FinTech, and university lecturing. Professional industry experience ranged from 0 to 12 years, with a median of 2.0 years. All participants had experience with Java and were familiar with object-oriented design patterns, though none had prior experience with the specific codebase used in the study. This selection ensured participants had sufficient technical skill to complete the tasks while also being unfamiliar with the codebase, simulating the common scenario of joining a new project.
+
+\textbf{Tasks.} Participants worked with the CrowdCode codebase described in Section~V-A. We selected rules covering command patterns, persistence, and architectural constraints, organized into pairs of comparable complexity.
+%\textbf{Tasks.} Participants worked with CrowdCode, a web-based crowdsourcing platform for software development. The codebase implements a microtask architecture where complex software tasks are broken into small, independent units (microtasks) coordinated through a graph of artifacts such as functions, tests, and reviews. The codebase uses Google App Engine with the Objectify framework and contains design rules related to command patterns, entity persistence, and artifact relationships. The codebase consists of approximately 45,000 lines of Java code across 380 classes. 
+Each task required the participant to identify and fix a specific design rule violation in the CrowdCode codebase, modifying the relevant source files to bring the code into compliance with the rule while maintaining consistency with existing codebase patterns.
+
+
+
+%\textbf{Codebase.} Participants worked with CrowdCode, a web-based crowdsourcing platform for software development. The codebase implements a microtask architecture where complex software tasks are broken into small, independent units (microtasks) coordinated through a graph of artifacts such as functions, tests, and reviews. The codebase uses Google App Engine with the Objectify framework and contains design rules related to command patterns, entity persistence, and artifact relationships. The codebase consists of approximately 45,000 lines of Java code across 380 classes.
+
+%\textbf{Design Rule Sets.} We selected 8 rules covering command patterns, persistence, and architectural constraints, organized into 4 pairs of comparable complexity.
+
+\begin{comment}
+\begin{itemize}
+\item \textit{Set 1:} Rule 1 (Command static methods must construct the right Command subclass) + Rule 2 (Every Command subclass must implement execute). These rules ensure the command pattern is correctly implemented.
+\item \textit{Set 2:} Rule 3 (Artifact subclasses must be annotated @Entity) + Rule 4 (Microtasks must hold a reference to their owning Artifact). These rules ensure proper persistence and artifact relationships.
+\item \textit{Set 3:} Rule 6 (Artifact-to-artifact communication must be indirected through Commands) + Rule 7 (Artifact creation should only happen via its Create Command). These architectural rules ensure proper distribution in the sharded system.
+\item \textit{Set 4:} Rule 8 (Only DTOs should be serialized; keep ObjectMapper out of entities) + Rule 10 (save() must be immediately followed by now()). These rules ensure proper data handling.
+\end{itemize}
+\end{comment}
+
+\textbf{Study Design.} We used a within-subjects design where each participant completed two tasks: one without DesignFix assistance (using only the design rule checker to identify violations) and one with DesignFix assistance. Each participant was randomly assigned one of the four rule sets. Within each set, one rule was randomly assigned to the no-assistance condition and the other to the DesignFix condition. This counterbalancing ensured that any differences in rule difficulty would be balanced across conditions. Task order (assisted first vs. unassisted first) was also counterbalanced. For the LLM, we chose gpt-4o-nov with temperature 0.5.
+
+\textbf{Procedure.} The study was conducted remotely via video conferencing with screen sharing. Participants first received a 10-minute introduction to design rules and the CrowdCode codebase, including an overview of the architecture and key classes. They then completed a 5-minute tutorial on using the design rule checker interface. For participants assigned to complete the DesignFix condition second, the tutorial also covered the LLM-assisted features.
+
+Each task had a 20-minute time limit. Participants were instructed to fix the violation while maintaining consistency with the codebase patterns. After each task, participants completed the NASA Task Load Index (NASA-TLX) questionnaire~\cite{hart1988development} and answered semi-structured interview questions about their experience, strategies, and challenges. Sessions were screen-recorded with participant consent for later analysis.
+
+\textbf{Measures.} We collected:
+\begin{itemize}
+\item \textit{Time to completion:} Time from task start until participant declared completion or reached the 20-minute limit
+\item \textit{Correctness:} Whether the fix resolved the violation without introducing new errors, verified by running the rule checker and manual inspection
+\item \textit{NASA-TLX scores:} Six dimensions of workload (mental demand, physical demand, temporal demand, performance, effort, frustration), each rated 1-21
+%\item \textit{Qualitative feedback:} Interview responses about strategies, challenges, tool support, and tool suggestions 
+\end{itemize}
+
+
+\subsection{Quantitative Results}
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.8\linewidth]{images/Task_Completion_Chart_boxplot.png}
+  \caption{Task times with and without DesignFix. Boxplots show distributions; points indicate individual participants colored by task outcome, with lines linking each participant}
+\label{img:task_completion}
+\end{figure}
+
+\textbf{Task Completion Time.} Participants completed tasks faster with DesignFix assistance. The mean completion time was 10.00 minutes (SD=1.80) with DesignFix compared to 15.71 minutes (SD=3.02) without assistance (Table~\ref{tab:time}). A paired-samples t-test confirmed this difference was statistically significant (t(13)=9.57, p$<$0.001), with a very large effect size (Cohen's d=2.56). The time reduction of 5.71 minutes represents a 36.4\% improvement in task efficiency.
+
+\begin{table}[t]
+\caption{Task Completion Time (minutes)}
+\label{tab:time}
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Condition} & \textbf{Mean} & \textbf{SD} & \textbf{Median} & \textbf{Min} & \textbf{Max} \\
+\midrule
+Without DesignFix & 15.71 & 3.02 & 15.5 & 11 & 20 \\
+With DesignFix & 10.00 & 1.80 & 10.00 & 7 & 13 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+From Figure~\ref{img:task_completion} it can be observed that all 14 participants completed the DesignFix-assisted task faster. Individual time reductions ranged from 2 minutes (P7, 14\%) to 11 minutes (P4, 55\%). Notably, P4 reached the 20-minute time limit without DesignFix and failed to produce a correct fix, yet completed the assisted task in just 9 minutes with a correct solution. The consistency of improvement across participants, regardless of experience level, suggests that the benefits are robust across developer profiles.
+The variance in completion times was also notably lower in the DesignFix condition (SD=1.80 vs. SD=3.02). This indicates that DesignFix helps normalize performance across participants with varying experience levels.
+
+\textbf{Correctness.} Participants achieved higher correctness rates with DesignFix assistance. In the DesignFix condition, 13 of 14 participants (92.9\%) produced correct fixes that resolved the design rule violation. In the unassisted condition, only 6 of 14 participants (42.9\%) produced correct fixes. This improvement was statistically significant (exact McNemar's test, $p = 0.016$). Of the seven participants whose outcome changed between conditions, all seven improved (failed without DesignFix but succeeded with it), while none worsened.
+
+%Analysis of the McNemar's contingency table reveals the pattern of change: 7 participants improved (failed without DesignFix but succeeded with it), 6 participants succeeded in both conditions, 0 participants worsened, and 1 participant (P8) failed in both conditions. The absence of any participants who succeeded without DesignFix but failed with it suggests that the tool does not introduce new failure modes for developers who already possess sufficient codebase knowledge.
+
+\begin{table}[htbp]
+\centering
+\caption{Error patterns observed in the unassisted condition. Participants could exhibit multiple patterns.}
+\label{tab:error-patterns}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Error Pattern} & \textbf{Participants} & \textbf{Count} \\
+\midrule
+Syntax/compile errors & P1, P7, P9, P10 & 4 \\
+Wrong method signature & P2, P9, P10 & 3 \\
+Partial fix & P1, P2, P4 & 3 \\
+Misunderstood rule & P3, P4, P7 & 3 \\
+\midrule
+Reached time limit & P4, P9 & 2 \\
+Surrendered early & P8 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+Table~\ref{tab:error-patterns} summarizes error patterns in the unassisted condition; notably, several participants (P4, P9) exhibited multiple error types.
+\begin{comment}
+The incorrect fixes in the unassisted condition exhibited several distinct 
+patterns (Table~\ref{tab:error-patterns}). Syntax errors were most common, 
+but conceptual errors-wrong method signatures, partial fixes, and 
+misunderstanding which architectural layer to edit-were equally prevalent. 
+Notably, several participants exhibited multiple error types, with P4 and P9 
+each appearing in three categories.
+\end{comment}
+P3's experience illustrates a common failure pattern: the participant spent approximately 15 of 19 minutes editing entity classes (Question.java, Project.java) when the actual violation was in CrowdServlet.java. %P3 noted:
+%\pquote{P3}{Unassisted}{It sounds like a persistence ordering issue, so I should look for save wrappers... I'm probably fixing the wrong layer.}
+%\textit{``It sounds like a persistence ordering issue, so I should look for save wrappers... I'm probably fixing the wrong layer.''}
+With DesignFix, the same participant received precise file locations and completed a different task correctly in 12 minutes.
+
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.8\linewidth]{images/NASA_TLX_enlarged.png}
+  \caption{Average NASA TLX ratings across six workload dimensions by task with and without DesignFix, aggregated over 14 participants. There was a consistent reduction in perceived workload with DesignFix, with the largest decreases in mental demand and frustration.}
+  \label{img:nasa_tlx}
+\end{figure}
+\textbf{Cognitive Workload.} NASA-TLX scores were lower across all six
+dimensions when using DesignFix (Figure~\ref{img:nasa_tlx}). To test
+significance, we conducted exact Wilcoxon signed-rank tests on each
+dimension---appropriate for paired ordinal data with small
+samples---and applied Bonferroni correction for six comparisons
+(adjusted $\alpha = 0.0083$).
+Five of the six dimensions (except Physical Demand which was irrelevant in this context) showed statistically significant reductions
+after correction: Mental Demand, Temporal Demand, Performance, Effort, and Frustration, all at ($W=0$, $p<0.001$); all Bonferroni-adjusted $p<0.002$. The $W=0$
+indicates that no participant reported higher workload with DesignFix
+on any dimension. A Wilcoxon test on the composite (unweighted mean)
+score confirmed a significant overall reduction ($10.64$ vs.\ $4.69$;
+$W=0$, $p<0.001$).
+ 
+Frustration showed the largest raw reduction, dropping from a mean of
+12.07 to 4.43. This was most pronounced among participants who
+struggled in the unassisted condition. P10, who reported frustration
+of 19 without DesignFix, reported only 6 with
+assistance. Mental Demand and Effort showed similar large reductions, indicating that DesignFix
+substantially reduced the cognitive burden of locating relevant code
+and reasoning about unfamiliar patterns. Performance satisfaction also
+improved, with sharply decreased standard
+deviation, indicating more consistent self-assessed
+performance across participants regardless of background.
+
+
+%% ============================================
+%% SECTION: QUALITATIVE FINDINGS
+%% ============================================
+
+\subsection{Qualitative Findings}
+
+We conducted a detailed analysis of interview transcripts, post-task questionnaire responses, and screen recordings. We identified six major themes.
+
+\textbf{Theme 1: Navigation Dominates Task Difficulty.} The most universally valued feature was DesignFix's ability to identify specific file locations and code segments, mentioned by all 14 participants. Screen recording analysis revealed participants spent an average of 7.2 minutes before their first code modification in the unassisted condition, compared to 1.8 minutes with DesignFix.
+This reveals that DesignFix's primary value lies in \textit{codebase navigation} rather than code generation. P1 spent the first 10 minutes of the unassisted task searching the web for documentation, finding only unrelated examples instead of guidance specific to this codebase's design rules.
+%\textit{``I expected some official spec for this rule, but I kept finding unrelated JPA examples.''}.
+With DesignFix, P1 reported 
+\textit{``It named the files and basically gave me the patch... No hunting - just edit where it said.''} 
+
+
+Even expert participants who rejected the automated acceptance workflow benefited substantially. The most experienced participant (P11) manually copied code, yet still achieved 36\% time savings. P11's feedback illuminates this:
+\pquote{P11}{with DesignFix}{Even though the tool gave me the patch, I don't trust a button to blindly inject code into the codebase. But it pointed to the exact file and gave a concrete patch, so I didn't have to trace ownership semantics.}
+
+%\textit{``Even though the tool gave me the patch, I don't trust a button to blindly inject code into the codebase. But it pointed to the exact file and gave a concrete patch, so I didn't have to trace ownership semantics.''}
+
+
+
+%\pquote{P1}{With DesignFix}{It named the files and basically gave me the patch... No hunting - just edit where it said.}
+
+
+
+%P4, who reached the 20-minute time limit without DesignFix, explained:
+%\pquote{P4}{Unassisted}{I don't have intuition for this command layer yet. I kept finding classes that looked right but weren't.}
+
+%\textit{``I don't have intuition for this command layer yet. I kept finding classes that looked right but weren't.''} 
+
+%With DesignFix, P4 completed the task in 9 minutes, attributing the improvement to the tool's precise file and line identification.
+
+\textbf{Theme 2: Explanation Quality and Contextual Alignment.} Participants strongly valued explanations that connected the design rule to specific patterns already present in the codebase (mentioned by 13 of 14 participants). P3 reported: 
+\pquote{P3}{with DesignFix}{
+The explanation tied the rule to the DTO layer that already exists here, which made the change feel justified.
+}
+
+%\textit{``The explanation tied the rule to the DTO layer that already exists here, which made the change feel justified.''}
+
+P2 noted: 
+\pquote{P2}{with DesignFix}{The explanation matched the factory pattern in this codebase, not just generic advice.}
+
+%\textit{``The explanation matched the factory pattern in this codebase, not just generic advice.''} 
+
+%P9, who struggled with the command hierarchy in the unassisted condition, found the explanation clarifying:
+%\pquote{P9}{with DesignFix}{The explanation clarified the factory-to-subclass mapping, which I was shaky on.}
+
+%\textit{``The explanation clarified the factory-to-subclass mapping, which I was shaky on.''}
+
+Even when the suggested code was incorrect, the explanation's correct identification of key design concepts (such as 'command indirection' and 'caller/callee') enabled participants to find the right fix pattern independently. 
+%- a phenomenon explored further in Theme 3.
+
+
+\textbf{Theme 3: Verification Affordances Enable Appropriate Trust Calibration.} We observed that successful tool use depends on verification support, not just suggestion accuracy. For example, P14 received an \textit{incorrect} fix 
+%(direct artifact call violating the rule) 
+but a \textit{correct} explanation. Through the review step, P14 detected the inconsistency:
+
+\pquote{P14}{with DesignFix}{The fix didn't match the explanation, but the keywords were right.}
+
+%\textit{``The fix didn't match the explanation, but the keywords were right.''} 
+
+\noindent Using explanation keywords, P14 found correct patterns and succeeded. P8 received a \textit{correct} fix but skipped verification, pasted incorrectly, and failed.
+This suggests that the tool provided \textit{trust calibration mechanisms}: features enabling appropriate trust or distrust of AI suggestions. Less experienced participants valued verification features as safety nets:
+\pquote{P13}{with DesignFix}{Having that intermediate step where I could see the code before it became part of the project gave me the confidence to proceed.}
+
+%\textit{``Having that intermediate step where I could see the code before it became part of the project gave me the confidence to proceed.''}
+
+\textbf{Theme 4: Cognitive Load Reduction.} 12 of 14 participants explicitly described reduced working memory and attention demands. The unassisted condition required simultaneously tracking file locations, understanding patterns, remembering previous exploration paths, and reasoning about the fix. P5 noted:
+\pquote{P5}{with DesignFix}{Without the tool, I had to hold so much in my head: where files are, what the pattern looks like, what I've already tried. With the tool, I could just focus on understanding the fix rather than discovering it.}
+
+%\textit{``Without the tool, I had to hold so much in my head: where files are, what the pattern looks like, what I've already tried. With the tool, I could just focus on understanding the fix rather than discovering it.''}
+
+P9, who reached the time limit in the unassisted condition after ``getting lost jumping between the Command files,'' found the split view particularly helpful: 
+\pquote{P9}{with DesignFix}{
+It automatically opened the Factory class on the left and the fix on the right. I didn't have to search for the file or worry about losing my place, I could verify the AddCallee signature side-by-side.
+}
+
+
+%\textit{``It automatically opened the Factory class on the left and the fix on the right. I didn't have to search for the file or worry about losing my place - I could verify the AddCallee signature side-by-side.''}
+
+\textbf{Theme 5: Workflow Integration and Friction Points.} Participants had varied preferences for fix application, revealing a tension between speed and safety (mentioned by 10 of 14 participants). Some appreciated the review step: P1 noted, 
+\pquote{P1}{with DesignFix}{I actually liked that it opened in a new untitled tab first. Having the explanation text right above the code block helped me verify the fix before committing.}
+
+%\textit{``I actually liked that it opened in a new untitled tab first. Having the explanation text right above the code block helped me verify the fix before committing.''} 
+
+P5 used \textit{``the untitled file as a sandbox''} to make minor adjustments before accepting. Additionally, some participants found friction in the multi-step workflow, noting that clicking 'Accept' in the browser and then switching context to the IDE required too many steps.
+%\textit{``It felt like too many clicks. I clicked `Accept' in the browser, then I had to switch context to the IDE.''} 
+
+P10 experienced state management issues: 
+\pquote{P10}{with DesignFix}{I clicked `Suggest Fix' twice and got two different suggestions... suddenly I had multiple `Untitled' tabs open. It became messy very quickly.}
+
+%\textit{``I clicked `Suggest Fix' twice and got two different suggestions... suddenly I had multiple `Untitled' tabs open. It became messy very quickly.''} 
+
+
+
+The most requested improvement (13/14 participants) was diff-style highlighting showing original vs. modified code after accepting changes. P7 explained: 
+\pquote{P7}{with DesignFix}{I would have preferred red/green highlighting between the original and modified code blocks to spot the change instantly in the original file content.}
+
+
+%\textit{``I would have preferred red/green highlighting between the left and right panes to spot the change instantly.''}
+
+Nine participants requested multi-violation scanning to identify all related violations at once. Seven participants suggested surfacing related patterns from the codebase to enable verification against existing correct examples.
+
+%\noindent Other participants suggested workflow improvements such as keyboard shortcuts to accept changes to reduce context switching.
+
+\subsection{Failure Case Analysis}
+
+Two cases merit detailed analysis for the insights they provide about system limitations and design implications.
+
+\textbf{Case 1: Incorrect Fix Placement.} P8 represents the only failure in the DesignFix condition. The participant received a correct suggested fix 
+%for the command-only artifact creation rule 
+but pasted it in an incorrect location without careful verification. 
+%P8 gave up the unassisted task at 12 minutes rather than continue searching. With DesignFix, P8 completed in 8 minutes but produced an incorrect result.
+P8's workflow feedback reveals the issue: 
+\pquote{P8}{with DesignFix}{This was much faster than my usual workflow. I didn't have to read any extra fluff... I saw the one-line constructor change, compared it in one second, and hit accept.}
+
+%\textit{``This was much faster than my usual workflow. I didn't have to read any extra fluff... I saw the one-line constructor change, compared it in one second, and hit accept.''} 
+
+\noindent The speed-oriented approach caused P8 to skip verification. This illustrates that while DesignFix dramatically reduces time and effort, developers must still engage in a review process.
+
+\textbf{Case 2: Incorrect LLM Suggestion Recovered via Explanation.} P14 encountered a case where DesignFix's suggested code was incorrect --- it used a direct call that violated the command indirection rule ---  but the explanation correctly described the rule's requirements.
+
+P14 detected the inconsistency: 
+\pquote{P14}{with DesignFix}{
+The tool actually gave me a bad patch - it suggested a direct call which was a violation. Because the workflow opened an untitled file first, I was able to catch this.
+}
+
+%\textit{``The tool actually gave me a bad patch - it suggested a direct call which was a violation. Because the workflow opened an untitled file first, I was able to catch this.''}
+
+\noindent P14 used explanation keywords (``command indirection,'' ``caller/callee'') to find the correct pattern in FunctionCommand.java, then manually corrected the suggestion before accepting. This demonstrates that explanations serve as an independent verification mechanism: even when code is wrong, correct explanations enable skilled developers to recover.
+
+
+\section{Threats to Validity}
+
+The within-subjects design controls for individual differences but may introduce order effects; we counterbalanced both rule assignment and task order to mitigate this. Three participants who timed out or gave up in the unassisted condition could inflate the time difference, though their failures reflect genuine task difficulty. The three development violations reused in the 45-violation evaluation set could introduce slight optimistic bias, but prompt refinements targeted general strategies rather than violation-specific tuning.
+Our user study used a single codebase (CrowdCode) with Java-specific design rules; results may differ for other languages, frameworks, or rule types. The participant pool skewed toward PhD students, and all were unfamiliar with the codebase by design, which does not capture how DesignFix would perform for developers with partial familiarity. LLM evaluation used GPT-4o exclusively; optimal prompting strategies may not transfer across providers. Moreover, correctness was measured as a binary outcome, which does not capture partial fixes. 
+
+
+\section{Discussion}
+We found that LLM-powered support for developers in fixing design rule violations can help developers work substantially faster, reducing task time by 36\%. 
+%\subsection{The Navigation Burden in Unfamiliar Codebases}
+This was in large part because of the value of precise file and location identification. Participants in the unassisted condition spent an average of 7.2 minutes before making their first code modification, compared to 1.8 minutes with DesignFix, and several (P1, P3, P7) edited entirely wrong files without realizing their error. This suggests that design rule violation repair is primarily a \textit{navigation and comprehension} problem rather than a coding problem. DesignFix's primary value may therefore lie in codebase navigation and pattern identification rather than code generation.
+
+%\subsection{Experience Stratification in Tool Adoption}
+
+Developer experience shaped not just performance but workflow adaptation. Less experienced participants used the review workflow as intended, while expert participants like P11 manually copied code rather than using acceptance buttons---yet still achieved 36\% time savings. This suggests LLM-assisted tools should support multiple interaction modes: guided workflows for novices and minimal-friction access to underlying reasoning for experts.
+
+%\subsection{Explanation-Code Alignment as a Safety Mechanism}
+
+The P14 case, where DesignFix provided incorrect code but a correct explanation, reveals an important safety property. Because explanations were prominently displayed alongside suggestions, P14 detected the inconsistency and recovered using explanation keywords. This suggests that tools should not sacrifice explanation quality for code accuracy, as explanations serve as an independent verification mechanism.
+
+
+\section{Conclusions}
+By leveraging LLMs, augmented with relevant context identified through lightweight static analysis, DesignFix assists developers in interpreting and repairing design violations. Rather than simply providing a fix, offering tailored explanations and examples helps developers effectively calibrate trust, validate fixes, and recover from incorrect suggestions.  
+%We presented DesignFix, an LLM-assisted approach for interpreting and repairing design rule violations. A systematic evaluation of prompting strategies across 9,450 model runs identified a two-step co-generative approach as optimal, and a user study demonstrated significant improvements in task completion time, correctness, and cognitive workload. Qualitative analysis revealed that DesignFix's primary value lies in precise codebase navigation rather than code generation, and that its verification affordances --- particularly the separation of explanations from code suggestions --- enable developers to calibrate trust and recover from incorrect suggestions. 
+Future work should explore multi-file fixes, long-term learning effects, and generalization across LLM providers.
+
+\section{Data Availability Statement}
+The data that supports the findings of this study are available in the ``Supplementary material" section of this submission. 
+
+
+\begin{comment}
+
+\section{Discussion}
+
+\subsection{The Navigation Burden in Unfamiliar Codebases}
+
+The most consistent finding across all 14 participants was the value of precise file and location identification. Participants in the unassisted condition spent an average of 7.2 minutes before making their first code modification, compared to 1.8 minutes with DesignFix. Several participants (P1, P3, P7) edited entirely wrong files without realizing their error.
+
+This finding suggests that design rule violation repair is primarily a navigation and comprehension problem rather than a coding problem. Participants generally knew how to write the necessary code once they understood what was needed; the difficulty lay in locating the relevant code and understanding the expected pattern. DesignFix's primary value may therefore be as a codebase navigation and pattern-identification tool rather than a code generation tool.
+
+\subsection{Experience Stratification in Tool Adoption}
+
+Our study revealed that developer experience level shapes not just performance outcomes but workflow adaptation patterns. Less experienced participants used the review workflow as intended, treating the untitled file as a verification step. More experienced participants, exemplified by P11, adapted the workflow to maintain greater control, manually copying code rather than using acceptance buttons.
+
+This finding suggests that LLM-assisted development tools should support multiple interaction modes. Novice users may benefit from guided workflows that build verification habits, while expert users may prefer minimal friction with easy access to underlying reasoning. The fact that P11 still saved 36\% time despite rejecting the standard workflow indicates that the value of DesignFix extends beyond automated fix application to include information retrieval and pattern identification.
+
+\subsection{Explanation-Code Alignment as a Safety Mechanism}
+
+The P14 case, where DesignFix provided incorrect code but a correct explanation, reveals an important safety property. Because explanations were prominently displayed alongside code suggestions, P14 detected the inconsistency and recovered using explanation keywords. This suggests that tools should not sacrifice explanation quality for code accuracy, as explanations serve as an independent verification mechanism.
+
+
+\section{Threats to Validity}
+
+\textbf{Internal Validity.} The within-subjects design controls for individual differences but may introduce order and learning effects. We counterbalanced both rule assignment and task order to mitigate this. The 20-minute time limit may have affected behavior differently across conditions; three participants (P4, P8, P9) surrendered or reached the limit in the unassisted condition, which could inflate the time difference. However, their failures also reflect genuine difficulty with the unassisted task.
+
+\textbf{External Validity.} Our user study used a single codebase (CrowdCode) with specific design rules. Results may differ for other codebases, programming languages, or rule types. Participants had diverse experience levels (0 to 12 years professional experience) but none had prior exposure to the codebase, simulating the common scenario of joining a new project.
+
+\textbf{Construct Validity.} We measured correctness based on whether fixes resolved violations without introducing errors. P8's failure (correct suggestion applied incorrectly) and P14's success (incorrect suggestion corrected using explanation) illustrate edge cases where simple correctness metrics may not capture the full picture. NASA-TLX provides a validated measure of workload but is based on self-report.
+
+\section{Conclusion}
+
+We presented DesignFix, an approach for integrating LLMs to assist developers in understanding and repairing design rule violations. Through systematic experimentation across 9,450 model runs, we identified effective prompting strategies, finding that a two-step co-generative approach with rule-following examples achieves 90\% code fix success, 89\% Explanation Pass Rate, and 90\% Surrounding Code Pass Rate (best across model versions).
+
+Our user study with 14 participants demonstrated that DesignFix reduces task completion time by more than one-third (10.00 vs. 15.71 minutes, a 36\% reduction) while substantially improving correctness (93\% vs. 43\%) and reducing cognitive workload across all measured dimensions. Qualitative analysis revealed that participants particularly valued navigation support, contextual explanations, and the ability to verify suggestions before applying them.
+
+These findings suggest that LLMs can play a valuable role in helping developers work with design rules, particularly in unfamiliar codebases. Future work should explore extending the approach to handle multi-file fixes, investigate long-term effects on learning and skill development, compare effectiveness across different LLM providers.
+
+\end{comment}
+
+\balance
+
+\bibliographystyle{IEEEtran}
+\begin{thebibliography}{30}
+
+% === Kept from original (6) ===
+
+\bibitem{mehrpour2019active}
+S.~Mehrpour, T.~D.~LaToza, and R.~K.~Kindi,
+``Active Documentation: Helping Developers Follow Design Decisions,''
+in \emph{Symposium on Visual Languages and Human-Centric Computing (VL/HCC)}, 2019, pp.~87--96.
+
+\bibitem{peng2023impact}
+S.~Peng, E.~Kalliamvakou, P.~Cihon, and M.~Demirer,
+``The Impact of AI on Developer Productivity: Evidence from GitHub Copilot,''
+\emph{arXiv preprint arXiv:2302.06590}, 2023.
+
+\bibitem{liang2024survey}
+J.~T.~Liang, C.~Yang, and B.~A.~Myers,
+``A Large-Scale Survey on the Usability of AI Programming Assistants: Successes and Challenges,''
+in \emph{Proc.\ 46th IEEE/ACM International Conference on Software Engineering (ICSE)}, 2024.
+
+\bibitem{johnson2023trust}
+B.~Johnson, C.~Bird, D.~Ford, N.~Forsgren, and T.~Zimmermann,
+``Make Your Tools Sparkle with Trust: The PICSE Framework for Trust in Software Tools,''
+in \emph{Proc.\ IEEE/ACM 45th International Conference on Software Engineering: Software Engineering in Practice (ICSE-SEIP)}, 2023, pp.~409--419.
+
+\bibitem{russo2024navigating}
+D.~Russo,
+``Navigating the Complexity of Generative AI Adoption in Software Engineering,''
+\emph{ACM Transactions on Software Engineering and Methodology}, vol.~33, no.~5, pp.~1--50, 2024.
+
+\bibitem{alhaque2025evolution}
+E.~Al~Haque, C.~Brown, T.~D.~LaToza, and B.~Johnson,
+``The Evolution of Information Seeking in Software Development: Understanding the Role and Impact of AI Assistants,''
+in \emph{FSE Companion '25}, 2025.
+
+% === Static Analysis for Defect Detection and Repair (8) ===
+
+\bibitem{nachtigall2022usability}
+M.~Nachtigall, M.~Schlichtig, and E.~Bodden,
+``A Large-Scale Study of Usability Criteria Addressed by Static Analysis Tools,''
+in \emph{Proc.\ ACM SIGSOFT International Symposium on Software Testing and Analysis (ISSTA)}, 2022, pp.~532--543.
+
+\bibitem{guo2023falsepositive}
+Z.~Guo, S.~Liu, J.~Lu, et~al.,
+``Mitigating False Positive Static Analysis Warnings: Progress, Challenges, and Opportunities,''
+\emph{IEEE Transactions on Software Engineering}, vol.~49, no.~12, pp.~5154--5170, 2023.
+
+
+\bibitem{li2022erosion}
+R.~Li, P.~Liang, M.~Soliman, and P.~Avgeriou,
+``Understanding Software Architecture Erosion: A Systematic Mapping Study,''
+\emph{Journal of Software: Evolution and Process}, vol.~34, no.~3, e2423, 2022.
+
+\bibitem{liu2023deepsmell}
+H.~Liu, J.~Jin, Z.~Xu, Y.~Zou, Y.~Bu, and L.~Zhang,
+``Deep Learning Based Code Smell Detection,''
+\emph{IEEE Transactions on Software Engineering}, Vol. 47, No. 9, pp. 1811–1837, 2021
+
+\bibitem{etemadi2022sorald}
+K.~Etemadi, N.~Harrand, S.~Larsen, et~al.,
+``Sorald: Automatic Patch Suggestions for SonarQube Static Analysis Violations,''
+\emph{IEEE Transactions on Dependable and Secure Computing}, vol.~20, no.~4, pp.~2794--2810, 2023.
+
+\bibitem{wadhwa2024core}
+N.~Wadhwa, J.~Pradhan, A.~Sonwane, et~al.,
+``CORE: Resolving Code Quality Issues using LLMs,''
+\emph{Proc.\ ACM on Software Engineering}, vol.~1, no.~FSE, 2024.
+
+% === LLM-Based Automated Program Repair (9) ===
+
+\bibitem{xia2022alpharepair}
+C.~S.~Xia and L.~Zhang,
+``Less Training, More Repairing Please: Revisiting Automated Program Repair via Zero-Shot Learning,''
+in \emph{Proc.\ ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE)}, 2022, pp.~1--13.
+
+\bibitem{xia2023era}
+C.~S.~Xia, Y.~Wei, and L.~Zhang,
+``Automated Program Repair in the Era of Large Pre-trained Language Models,''
+in \emph{Proc.\ 45th IEEE/ACM International Conference on Software Engineering (ICSE)}, 2023, pp.~1482--1494.
+
+\bibitem{xia2024chatrepair}
+C.~S.~Xia and L.~Zhang,
+``Automated Program Repair via Conversation: Fixing 162 out of 337 Bugs for \$0.42 Each using ChatGPT,''
+in \emph{Proc.\ ACM SIGSOFT International Symposium on Software Testing and Analysis (ISSTA)}, 2024.
+
+\bibitem{xiang2024srepair}
+J.~Xiang, X.~Xu, F.~Kong, et~al.,
+``How Far Can We Go with Practical Function-Level Program Repair?''
+\emph{arXiv preprint arXiv:2404.12833}, 2024.
+
+\bibitem{bouzenia2025repairagent}
+I.~Bouzenia, P.~Devanbu, and M.~Pradel,
+``RepairAgent: An Autonomous, LLM-Based Agent for Program Repair,''
+in \emph{Proc.\ 47th IEEE/ACM International Conference on Software Engineering (ICSE)}, 2025.
+
+\bibitem{joshi2023ring}
+H.~Joshi, J.~Cambronero, S.~Gulwani, V.~Le, I.~Radi{\v{c}}ek, and G.~Verbruggen,
+``Repair Is Nearly Generation: Multilingual Program Repair with LLMs,''
+in \emph{Proc.\ AAAI Conference on Artificial Intelligence}, vol.~37, 2023, pp.~5131--5140.
+
+\bibitem{wang2023rapgen}
+W.~Wang, Y.~Wang, S.~Joty, and S.~C.~H.~Hoi,
+``RAP-Gen: Retrieval-Augmented Patch Generation with CodeT5 for Automatic Program Repair,''
+in \emph{Proc.\ ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE)}, 2023, pp.~146--158.
+
+\bibitem{jin2023inferfix}
+M.~Jin, S.~Shahriar, M.~Tufano, et~al.,
+``InferFix: End-to-End Program Repair with LLMs over Retrieval-Augmented Prompts,''
+in \emph{Proc.\ ESEC/FSE Industry Track}, 2023, pp.~1646--1656.
+
+% === LLM-Assisted Developer Tools and Human-AI Interaction (4) ===
+
+\bibitem{barke2023grounded}
+S.~Barke, M.~B.~James, and N.~Polikarpova,
+``Grounded Copilot: How Programmers Interact with Code-Generating Models,''
+\emph{Proc.\ ACM on Programming Languages}, vol.~7, no.~OOPSLA1, pp.~85--111, 2023.
+
+\bibitem{vaithilingam2023intellicode}
+P.~Vaithilingam, E.~L.~Glassman, P.~Groenwegen, et~al.,
+``Towards More Effective AI-Assisted Programming: A Systematic Design Exploration to Improve Visual Studio IntelliCode's User Experience,''
+in \emph{Proc.\ IEEE/ACM 45th International Conference on Software Engineering: Software Engineering in Practice (ICSE-SEIP)}, 2023, pp.~185--195.
+
+\bibitem{perry2023insecure}
+N.~Perry, M.~Srivastava, D.~Kumar, and D.~Boneh,
+``Do Users Write More Insecure Code with AI Assistants?''
+in \emph{Proc.\ ACM SIGSAC Conference on Computer and Communications Security (CCS)}, 2023, pp.~2785--2799.
+
+% === Prompting Strategies for Code Tasks (5) ===
+
+\bibitem{li2024scot}
+J.~Li, G.~Li, Y.~Li, and Z.~Jin,
+``Structured Chain-of-Thought Prompting for Code Generation,''
+\emph{ACM Transactions on Software Engineering and Methodology}, Vol. 34, No. 2, Article 37, pp. 1–23, 2025.
+
+\bibitem{jiang2024selfplanning}
+X.~Jiang, Y.~Dong, L.~Wang, et~al.,
+``Self-planning Code Generation with Large Language Models,''
+\emph{ACM Transactions on Software Engineering and Methodology}, vol.~33, no.~7, pp.~1--30, 2024.
+
+\bibitem{chen2024selfdebug}
+X.~Chen, M.~Lin, N.~Sch{\"a}rli, and D.~Zhou,
+``Teaching Large Language Models to Self-Debug,''
+in \emph{Proc.\ International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem{madaan2023selfrefine}
+A.~Madaan, N.~Tandon, P.~Gupta, et~al.,
+``Self-Refine: Iterative Refinement with Self-Feedback,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, vol.~36, 2023.
+
+\bibitem{zhou2023docprompting}
+S.~Zhou, U.~Alon, F.~F.~Xu, et~al.,
+``DocPrompting: Generating Code by Retrieving the Docs,''
+in \emph{Proc.\ International Conference on Learning Representations (ICLR)}, 2023.
+
+\bibitem{nashid2023cedar}
+N.~Nashid, M.~Sintaha, and A.~Mesbah,
+``Retrieval-Based Prompt Selection for Code-Related Few-Shot Learning,''
+in \emph{Proc.\ 45th IEEE/ACM International Conference on Software Engineering (ICSE)}, 2023, pp.~2456--2468.
+
+\bibitem{hart1988development}
+S.~G. Hart and L.~E. Staveland, ``Development of NASA-TLX (Task Load Index): Results of empirical and theoretical research,'' \emph{Advances in Psychology}, vol.~52, pp.~139-183, 1988.
+
+\bibitem{collard2013srcml}
+M.~L.~Collard, M.~J.~Decker, and J.~I.~Maletic,
+``srcML: An Infrastructure for the Exploration, Analysis, and Manipulation of Source Code: A Tool Demonstration,''
+in \emph{Proc.\ 29th IEEE International Conference on Software Maintenance (ICSM)}, 2013, pp.~516--519.
+
+\end{thebibliography}
+
+\end{document}

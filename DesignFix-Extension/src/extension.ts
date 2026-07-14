@@ -12,6 +12,7 @@ import { MiningRulesProcessor } from './MiningRulesProcessor';
 import { DoiProcessing } from './DoiProcessing';
 
 import { diffChunks, DiffChunk } from './FollowAndAuthorRulesProcessor';
+import { reconcile } from './reconcile';
 
 
 //const readFileAsync = promisify(fs.readFile);
@@ -271,49 +272,199 @@ export function activate(context: vscode.ExtensionContext) {
             }
         )
     );
+    // ---- Accept / Reject for reconciled fix reviews -------------------------
+    // Commands accept either a chunk index (legacy CodeLens path) or the URI of
+    // the review's modified-side document (editor-title buttons, notifications).
+    // With no argument they resolve the chunk from the active diff tab.
+
+    const resolveChunkIndex = (arg?: number | vscode.Uri): number => {
+        if (typeof arg === 'number') {
+            return arg >= 0 && arg < diffChunks.length ? arg : -1;
+        }
+        const target = arg instanceof vscode.Uri ? arg.toString() : undefined;
+        if (target) {
+            const i = diffChunks.findIndex(c => c.modifiedUri === target);
+            if (i >= 0) { return i; }
+        }
+        const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+        if (tab && tab.input instanceof vscode.TabInputTextDiff) {
+            const modified = tab.input.modified.toString();
+            const i = diffChunks.findIndex(c => c.modifiedUri === modified);
+            if (i >= 0) { return i; }
+        }
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+            const i = diffChunks.findIndex(c => c.modifiedUri === editor.document.uri.toString());
+            if (i >= 0) { return i; }
+        }
+        return diffChunks.length === 1 ? 0 : -1;
+    };
+
+    const closeReviewTab = async (chunk: DiffChunk): Promise<void> => {
+        // The right side of the review diff is an untitled document; with
+        // content it counts as dirty, so closing its tab would pop VS Code's
+        // "save?" dialog. Empty untitled editors close silently, so discard
+        // the preview's content before closing the tab.
+        const rightDoc = vscode.workspace.textDocuments.find(
+            d => d.uri.toString() === chunk.modifiedUri && d.uri.scheme === 'untitled'
+        );
+        if (rightDoc && !rightDoc.isClosed && rightDoc.getText().length > 0) {
+            const discard = new vscode.WorkspaceEdit();
+            discard.replace(
+                rightDoc.uri,
+                new vscode.Range(rightDoc.positionAt(0), rightDoc.positionAt(rightDoc.getText().length)),
+                ''
+            );
+            await vscode.workspace.applyEdit(discard);
+        }
+
+        const tabs = vscode.window.tabGroups.all.flatMap(g => g.tabs);
+        for (const tab of tabs) {
+            const input = tab.input;
+            const matches =
+                (input instanceof vscode.TabInputTextDiff && input.modified.toString() === chunk.modifiedUri) ||
+                (input instanceof vscode.TabInputText && input.uri.toString() === chunk.modifiedUri);
+            if (matches) {
+                try {
+                    await vscode.window.tabGroups.close(tab);
+                } catch (err) {
+                    console.warn('Failed to close review tab:', err);
+                }
+            }
+        }
+    };
+
+    const finishChunk = async (chunk: DiffChunk): Promise<void> => {
+        const i = diffChunks.indexOf(chunk);
+        if (i >= 0) {
+            diffChunks.splice(i, 1);
+        }
+        await vscode.commands.executeCommand('setContext', 'designfix.reviewActive', diffChunks.length > 0);
+        codeLensChangeEmitter.fire();
+    };
+
     context.subscriptions.push(
-        vscode.commands.registerCommand('designfix.acceptChange', async (index: number) => {
-            const chunk = diffChunks[index];
-            if (!chunk) {
-                vscode.window.showErrorMessage('No such change to accept.');
+        vscode.commands.registerCommand('designfix.acceptChange', async (arg?: number | vscode.Uri) => {
+            const index = resolveChunkIndex(arg);
+            if (index < 0) {
+                vscode.window.showWarningMessage('DesignFix: no pending fix found for this tab.');
                 return;
             }
-            // Prefer the edited content from this chunk's own diff tab, so
-            // accepting one file in a multi-file fix writes the right content.
-            const chunkEditor = chunk.modifiedUri
-                ? vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === chunk.modifiedUri)
-                : vscode.window.activeTextEditor;
-            const content = chunkEditor ? chunkEditor.document.getText() : chunk.newText;
+            const chunk = diffChunks[index];
+
+            // The right-side buffer is editable; honor any hand-edits the user made.
+            const rightDoc = vscode.workspace.textDocuments.find(d => d.uri.toString() === chunk.modifiedUri);
+            const rightText = rightDoc ? rightDoc.getText() : chunk.newText;
+
             try {
-                await fs.promises.writeFile(chunk.filePath, content, 'utf8');
-                vscode.window.showInformationMessage(`Changes applied to ${chunk.filePath.split(/[\\/]/).pop()}.`);
-                diffChunks.splice(index, 1);
-                if (diffChunks.length === 0) {
-                    FollowAndAuthorRulesProcessor.getInstance().clearDiffDecorations();
+                let doc: vscode.TextDocument | null = null;
+                try {
+                    doc = await vscode.workspace.openTextDocument(chunk.filePath);
+                } catch {
+                    doc = null; // fix creates a new file
                 }
-                codeLensChangeEmitter.fire();
+
+                if (doc) {
+                    // Re-reconcile against the CURRENT document state so the applied
+                    // edit stays minimal even after hand-edits or on-disk drift.
+                    let rec = reconcile(doc.getText(), rightText);
+                    if (rec.truncationSuspected) {
+                        const pick = await vscode.window.showWarningMessage(
+                            `Applying this fix would delete ${rec.keptDeletionLines} line(s) with no replacement ` +
+                            `(possibly truncated LLM output). How should DesignFix proceed?`,
+                            { modal: true },
+                            'Keep those lines and apply',
+                            'Delete them and apply'
+                        );
+                        if (pick === undefined) { return; }
+                        if (pick === 'Delete them and apply') {
+                            rec = reconcile(doc.getText(), rightText, { allowLargeDeletions: true });
+                        }
+                    }
+                    if (rec.identicalAfterReconcile) {
+                        vscode.window.showInformationMessage(
+                            'DesignFix: the file already satisfies this suggestion; nothing to apply.'
+                        );
+                        await closeReviewTab(chunk);
+                        await finishChunk(chunk);
+                        return;
+                    }
+                    const fullRange = new vscode.Range(
+                        doc.positionAt(0),
+                        doc.positionAt(doc.getText().length)
+                    );
+                    const edit = new vscode.WorkspaceEdit();
+                    edit.replace(doc.uri, fullRange, rec.patchedText);
+                    const applied = await vscode.workspace.applyEdit(edit);
+                    if (!applied) {
+                        throw new Error('workspace edit was not applied');
+                    }
+                    await doc.save();
+                } else {
+                    await fs.promises.writeFile(chunk.filePath, rightText, 'utf8');
+                }
+
+                vscode.window.showInformationMessage(
+                    `DesignFix: changes applied to ${chunk.filePath.split(/[\\/]/).pop()}.`
+                );
+                await closeReviewTab(chunk);
+                await finishChunk(chunk);
             } catch (err: any) {
-                vscode.window.showErrorMessage(`Failed to write file: ${err.message}`);
+                vscode.window.showErrorMessage(`Failed to apply fix: ${err.message}`);
             }
         })
     );
     context.subscriptions.push(
-        vscode.commands.registerCommand('designfix.rejectChange', async (index: number) => {
+        vscode.commands.registerCommand('designfix.rejectChange', async (arg?: number | vscode.Uri) => {
+            const index = resolveChunkIndex(arg);
+            if (index < 0) {
+                vscode.window.showWarningMessage('DesignFix: no pending fix found for this tab.');
+                return;
+            }
             const chunk = diffChunks[index];
-            if (!chunk) {
-                return vscode.window.showErrorMessage('No such change to reject.');
-            }
 
-            // Nothing was written to disk for this file yet (the diff is a
-            // preview), so just discard this file's change from the review set.
-            diffChunks.splice(index, 1);
-
-            if (diffChunks.length === 0) {
-                FollowAndAuthorRulesProcessor.getInstance().clearDiffDecorations();
-            }
-            codeLensChangeEmitter.fire();
-            vscode.window.showInformationMessage(`Rejected change to ${chunk.filePath.split(/[\\/]/).pop()}.`);
+            // Nothing was written to disk for this file (the diff is a preview),
+            // so just discard this file's change from the review set.
+            await closeReviewTab(chunk);
+            await finishChunk(chunk);
+            vscode.window.showInformationMessage(
+                `DesignFix: rejected change to ${chunk.filePath.split(/[\\/]/).pop()}.`
+            );
         })
+    );
+
+    // ---- Persistent review controls -----------------------------------------
+    // Notification toasts auto-dismiss after a few seconds, so the primary
+    // Accept/Reject affordance is a pair of status-bar buttons (plus the ✓/✕
+    // icons in the diff tab's title bar). They stay visible exactly as long as
+    // at least one fix review is pending, driven by codeLensChangeEmitter,
+    // which fires on every review open/accept/reject.
+    const acceptStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10000);
+    acceptStatusItem.text = '$(check) Accept DesignFix Fix';
+    acceptStatusItem.tooltip = 'Apply the DesignFix suggestion shown in the diff to the file';
+    acceptStatusItem.command = 'designfix.acceptChange';
+    acceptStatusItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+
+    const rejectStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 9999);
+    rejectStatusItem.text = '$(close) Reject';
+    rejectStatusItem.tooltip = 'Discard the DesignFix suggestion shown in the diff';
+    rejectStatusItem.command = 'designfix.rejectChange';
+
+    const updateReviewControls = () => {
+        if (diffChunks.length > 0) {
+            const suffix = diffChunks.length > 1 ? ` (${diffChunks.length} pending)` : '';
+            acceptStatusItem.text = `$(check) Accept DesignFix Fix${suffix}`;
+            acceptStatusItem.show();
+            rejectStatusItem.show();
+        } else {
+            acceptStatusItem.hide();
+            rejectStatusItem.hide();
+        }
+    };
+    context.subscriptions.push(
+        codeLensChangeEmitter.event(updateReviewControls),
+        acceptStatusItem,
+        rejectStatusItem
     );
 
 
