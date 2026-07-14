@@ -60,8 +60,9 @@ class Utilities {
                         explanation: data.llmModifiedFileContent.data.explanation,
                         fileToChange: data.llmModifiedFileContent.data.fileToChange,
                         modifiedFileContent: data.llmModifiedFileContent.data.modifiedFileContent,
-                        originalFileContent: data.originalFileContent || data.llmModifiedFileContent.data.originalFileContent || '',
+                        originalFileContent: data.llmModifiedFileContent.data.originalFileContent || data.originalFileContent || '',
                         edits: data.llmModifiedFileContent.data.edits || undefined,
+                        schemaVersion: data.llmModifiedFileContent.data.schemaVersion || undefined,
                         log: data.llmModifiedFileContent.data.log || undefined,
                     }
 

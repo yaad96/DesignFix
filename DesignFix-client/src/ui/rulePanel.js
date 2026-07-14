@@ -665,6 +665,12 @@ class SnippetView extends Component {
 
         // Resolve candidate fix-site files (cross-file rules) from rule metadata.
         const fixSiteFiles = this.gatherFixSiteFiles(this.props.rule, violationFilePath);
+        // The human-readable description can be less specific than the actual
+        // analyzer condition. Preserve every XPath entry so the two existing
+        // LLM calls can derive the complete satisfying pattern.
+        const constraintXPath = this.props.rule && this.props.rule.constraintXPathQuery
+            ? this.props.rule.constraintXPathQuery
+            : [];
 
         this.setState({ fixButtonClicked: true, originalFileContent: violationFileContent });
 
@@ -672,6 +678,7 @@ class SnippetView extends Component {
         if (!this.state.suggestionCreated) {
             const conversationHistory = await suggestFix(
                 rule,
+                constraintXPath,
                 parsedExample,
                 parsedSnippet,
                 parsedSurroundingCode,

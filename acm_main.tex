@@ -532,58 +532,44 @@ THEN clause defines a \textit{constraint} those elements must satisfy
 matches the quantifier but not the constraint, turning a design
 decision into continuously executable documentation.
 
-\textbf{Types of design rules.}
+\textbf{Concrete CrowdCode rule.}
 Rules range from statement-level conditions to class-level and
 cross-file architectural constraints. Listing~\ref{lst:dto-rule}
-introduces the running example used throughout the paper: each data
-transfer object must declare a zero-argument constructor for its
-deserialization workflow. A violating class can compile yet fail when
-the framework attempts to instantiate it.
+shows an actual instance of CrowdCode's DTO-constructor rule. The rule
+applies to classes extending \texttt{DTO} and requires them to declare
+a zero-argument constructor so that Jackson can instantiate them during
+deserialization.
+
+In the evaluated CrowdCode snapshot, \texttt{AnswerDTO} violates the
+rule because its only explicit constructor requires two arguments.
+\texttt{WorkerInFirebase} provides a same-project satisfying example
+because it declares an empty zero-argument constructor.
 
 \begin{lstlisting}[
   language=Java,
-  caption={Running example: ``IF a class is a DTO THEN it must declare a zero-argument constructor.''},
+  caption={Abridged CrowdCode excerpts showing a violation and a satisfying example of the DTO-constructor rule.},
   label={lst:dto-rule}
 ]
-// Violation: no zero-argument constructor
-public class OrderDto {
-  private String id;
-  public OrderDto(String id) {
-    this.id = id; }
+// src/com/crowdcoding/dto/ajax/questions/AnswerDTO.java
+public class AnswerDTO extends DTO {
+  public long questionId;
+  public String text;
+
+  public AnswerDTO(long questionId, String text) {
+    this.questionId = questionId;
+    this.text = text;
+  }
 }
-// Correct:
-public class OrderDto {
-  private String id;
-  public OrderDto() { }
-  public OrderDto(String id) {
-    this.id = id; }
-}
-\end{lstlisting}
 
-Cross-file architectural rules can require an operation reported in
-one class to be implemented through a designated command subclass in
-another. In these cases, the violation site and repair site differ, a
-distinction central to DesignFix's navigation support.
+// src/com/crowdcoding/dto/firebase/WorkerInFirebase.java
+public class WorkerInFirebase extends DTO {
+  // fields omitted
 
-\begin{comment}
-Other rules express higher-level architectural constraints. For instance, in a sharded architecture where commands are executed across multiple servers, operations might need to be handled through specific command patterns (Listing~\ref{lst:architectural-rule}):
+  public WorkerInFirebase() { }
 
-\begin{lstlisting}[
-  language=Java,
-  caption={Architectural design rule example},
-  label={lst:architectural-rule}
-]
-// Rule: Command static methods must
-// construct the right Command subclass
-public abstract class FunctionCommand
-    extends Command {
-  public static FunctionCommand create(...) {
-    return new Create(...);  }
-  protected static class Create
-      extends FunctionCommand { }
+  // parameterized constructor omitted
 }
 \end{lstlisting}
-\end{comment}
 
 \section{Related Work}
 \label{sec:related-work}
@@ -681,35 +667,71 @@ context extraction, two-step LLM generation, and interactive review.
   \label{fig:architecture}
 \end{figure*}
 
-Figure~\ref{fig:architecture} illustrates the DesignFix architecture. DesignFix operates as an IDE-integrated pipeline. When a developer edits code, DesignFix uses srcML~\cite{collard2013srcml} to convert Java source files into an XML abstract syntax tree (AST) representation that preserves both syntactic structure and source-level formatting, and checks each design rule against this AST. Each rule is stored as a JSON record in a rule table (\texttt{ruleTable.json}) in the project root, pairing its natural language description with two XPath queries that encode the rule's quantifier and constraint (Section~\ref{sec:background}). DesignFix loads the rule table at startup and
-re-evaluates it whenever the rules or source files change. Elements
-matched by both queries provide the rule-satisfying examples used
-for context extraction (Section~\ref{sec:context-extraction});
-elements matched by the quantifier but not the constraint are
-reported as violations. Listing~\ref{lst:rule-json} shows the stored
-form of the running-example DTO rule (Listing~\ref{lst:dto-rule}),
-illustrated in Figures~\ref{fig:ui-a}--\ref{fig:ui-b}. This rule representation and
-checking mechanism are not contributions of this paper: they follow
-ActiveDocumentation~\cite{mehrpour2019active}, which introduced the
-quantifier/constraint formulation and its srcML/XPath encoding, and
-RulePad~\cite{mehrpour2020rulepad}, which provides tooling for
-authoring such rules.
-\begin{lstlisting}[caption={A design rule as stored in
-\texttt{ruleTable.json}: a natural language description paired with
-quantifier and constraint XPath queries over the srcML AST
-(abridged).},label={lst:rule-json},basicstyle=\ttfamily\scriptsize]
-{ "title": "DTOs must have a no-argument
-    constructor",
-  "description": "IF a class is a DTO THEN it
-    must have a no-argument constructor. ...",
-  "quantifierXPathQuery":
-   ["//src:unit/src:class[contains(
-       src:name/text(),'Dto')]"],
-  "constraintXPathQuery":
-   ["//src:unit/src:class[contains(
-       src:name/text(),'Dto') and
-     src:block/src:constructor[count(
-       src:parameter_list/src:parameter)=0]]"] }
+Figure~\ref{fig:architecture} illustrates the DesignFix architecture.
+When a developer edits code, DesignFix uses srcML
+~\cite{collard2013srcml} to represent Java source as XML and checks each
+design rule against that representation. Each rule is stored in
+\texttt{ruleTable.json} as a natural-language description, a source-file
+scope, and quantifier and constraint XPath queries.
+
+Elements matching the quantifier but not the constraint are reported as
+violations. Elements matching both queries are satisfying examples.
+Listing~\ref{lst:rule-json} reproduces the relevant fields of the actual
+CrowdCode DTO-constructor rule. Its quantifier selects classes extending
+\texttt{DTO}; its constraint selects those classes that also declare a
+constructor with zero parameters. Consequently, \texttt{AnswerDTO}
+matches the quantifier but not the constraint, while
+\texttt{WorkerInFirebase} matches both.
+
+The stored natural-language description additionally states that the
+zero-argument constructor should have an empty body. The executable
+XPath checks the presence of a zero-argument constructor but does not
+inspect whether its body is empty.
+
+For each reported violation, DesignFix supplies one satisfying match as
+the project-specific example. The implementation first uses a satisfying
+match in the currently open file when one exists; otherwise, it uses the
+first satisfying match in the checker's loaded-file order. It performs
+no semantic ranking among candidates. For the run illustrated here, the
+selected example was \texttt{WorkerInFirebase.java}.
+
+DesignFix builds on the established rule representation and checking
+mechanisms of ActiveDocumentation~\cite{mehrpour2019active} and
+RulePad~\cite{mehrpour2020rulepad}. Its contribution begins at the
+checker-to-repair boundary, where detected violations are transformed
+into project-grounded explanations, candidate repairs, and a
+developer-review workflow.
+
+\begin{lstlisting}[
+  caption={Relevant fields of the CrowdCode DTO-constructor rule in \texttt{ruleTable.json}.},
+  label={lst:rule-json},
+  basicstyle=\ttfamily\scriptsize,
+  breaklines=true
+]
+{
+  "index": "9",
+  "title":
+    "DTOs must have a zero-argument constructor",
+  "description":
+    "IF a class is a DTO object \nTHEN it needs
+     to have a zero-argument constructor with
+     an empty body.",
+  "checkForFilesFoldersConstraints": "INCLUDE",
+  "checkForFilesFolders": [
+    "src/com/crowdcoding/dto"
+  ],
+  "processFilesFolders": "WITHIN",
+  "quantifierXPathQuery": [
+    "//src:unit/src:class[
+       src:super/src:extends/src:name/text()=\"DTO\"]"
+  ],
+  "constraintXPathQuery": [
+    "//src:unit/src:class[
+       src:super/src:extends/src:name/text()=\"DTO\"
+       and src:block/src:constructor[
+         count(src:parameter_list/src:parameter)=0]]"
+  ]
+}
 \end{lstlisting}
 Upon detecting a violation, the context extraction module assembles the relevant information — the rule description, a rule-satisfying example from the same codebase, the violating code, and the surrounding file context — and passes it to the two-step LLM pipeline described below. The resulting fix and explanation are then presented to the developer through an interactive diff-based review interface.
 
@@ -822,7 +844,7 @@ omits, such as imports and package placement.
 % Add subsection text here.
 Our evaluation (Section~\ref{sec:evaluation-one}) found that a two-step prompting approach, which separates free-form reasoning from structured output generation, outperforms single-shot prompts.
 
-\textbf{Step 1: Unstructured Reasoning.} The first prompt contains the four context elements described above and instructs the model to produce a free-form response explaining the violation and a fix. The prompt explicitly encourages the model to ``take as much time as needed'' to reason through the problem without worrying about output format. This step uses a temperature of 0.50, which our evaluation (Section~\ref{sec:evaluation-one}) identified as optimal for balancing reasoning quality and consistency.
+\textbf{Step 1: Unstructured Reasoning.} The first prompt contains the five inputs described above and instructs the model to produce a free-form response explaining the violation and a fix. The prompt explicitly encourages the model to ``take as much time as needed'' to reason through the problem without worrying about output format. This step uses a temperature of 0.50, which our evaluation (Section~\ref{sec:evaluation-one}) identified as optimal for balancing reasoning quality and consistency.
 
 Figure~\ref{fig:architecture} shows the structure of the Step~1 prompt. Each context element is enclosed in explicitly labeled delimiters, enabling the model to distinguish the reported violation file, the structural context surrounding the violation, and the specific code that triggered the rule. When required by the rule, the generated suggestion may identify a repair location in another file.
 \begin{comment}
@@ -1010,26 +1032,40 @@ Throughout this paper, we will refer
 
 \textbf{Evaluation Metrics.} We assessed LLM suggestions along three dimensions:
 
-\textit{Code Fix Success Rate:} Whether the suggested fix actually resolves the design rule violation. We applied each fix to the codebase and verified that the rule checker no longer flagged a violation. This metric captures functional correctness.
+\textit{Code Fix Success Rate:} Whether the suggested patch resolves
+the reported design-rule violation. We applied each patch and reran the
+rule checker; a patch passed when the checker no longer reported the
+violation.
 
-\textit{Explanation Correctness (Explanation Pass Rate):} Whether the explanation correctly identifies the violation cause and aligns with the changes. This metric captures whether the explanation would help a developer understand the violation.
+\textit{Surrounding Code Pass Rate:} Whether the proposed patch avoids
+changes that are unrelated or unnecessary to repairing the reported
+violation. Necessary supporting edits, such as adding an import or
+modifying a separate repair file, are permitted. This metric captures
+preservation of unrelated code and is assessed independently of whether
+the patch resolves the violation.
 
-\textit{Surrounding Code Pass Rate:} Whether the fix integrates cleanly with surrounding code without introducing syntax errors, broken references, or unintended modifications. This captures whether the fix can be applied without side effects.
+\textit{Explanation Correctness:} Whether the explanation accurately
+identifies the violated rule, correctly explains why the reported code
+violates it, and remains consistent with the proposed patch.
 
-\textbf{Labeling Procedure.} Code Fix Success is tool-checked end to
-end, as described above. Explanation Correctness and Surrounding
-Code Pass Rate were manually labeled by the first author against
-rubrics fixed before labeling began. \textit{Explanation
-Correctness} passes only if (a) the explanation identifies the rule
-that was actually violated, (b) it correctly attributes why the code
-violates that rule, and (c) it is consistent with the suggested fix.
-\textit{Surrounding Code Pass Rate} passes only if the rule checker,
-re-run after the patch is applied, no longer reports the violation,
-and a diff against the original file shows no modifications outside
-the violation locus: no renamed identifiers, added comments, or
-removed imports. The rubrics, model outputs, and labels are included
-in the supplementary materials for independent audit;
-Section~\ref{sec:threats} discusses the absence of a second rater.
+\textbf{Labeling Procedure.}
+\textit{Code Fix Success} was determined by rerunning the rule checker after
+applying each patch. Explanation Correctness and Surrounding Code Pass
+Rate were manually labeled by the first author using rubrics fixed
+before labeling began.
+
+\textit{Explanation Correctness} passed only if the explanation
+(a) identified the rule that was violated, (b) correctly explained why
+the code violated that rule, and (c) was consistent with the proposed
+patch.
+
+\textit{Surrounding Code Pass Rate} was assessed independently of Code
+Fix Success. It passed when a diff against the original project snapshot
+contained no unrelated or unnecessary modifications. Changes required
+to implement the attempted repair---including necessary imports,
+declarations, or edits in a separate repair file---were permitted. A
+patch could therefore preserve surrounding code even if it failed to
+resolve the reported violation.
 
 
 \subsection{Results}
@@ -1051,7 +1087,12 @@ Section~\ref{sec:threats} discusses the absence of a second rater.
 \end{figure}
 
 \textbf{Code Fix Success Rate.} Figure~\ref{fig:code-fix} presents code fix success rates across prompt variants, temperatures, and model versions. The Baseline prompt represents unassisted foundation-model use: it supplies only the rule description and the violating snippet, approximating what a developer obtains by pasting a checker warning and the flagged code into a conversational LLM such as ChatGPT, without any of DesignFix's context augmentation. This baseline achieved only 62--64\% success at temperature 0.5.
-Adding code-only output constraints (Prompt 1) improved success to 68-70\%, and adding rule-following examples (Prompt 2) further improved success to 76-77\%. The Final Prompt (two-step co-generative) achieved the highest success rates across all conditions. At temperature 0.5, the Final Prompt achieved 88\% success with gpt-4o-nov and 90\% with gpt-4o-aug. This represents a 26-28 percentage point improvement over the Baseline and an 8-10 point improvement over the best single-shot variant (Prompt 5). The 26--28-point gap between the Baseline and Final prompts thus quantifies the contribution of DesignFix's context engineering --- same-codebase rule-satisfying examples, scoped surrounding context,
+Adding code-only output constraints (Prompt 1) improved success to 68-70\%, and adding rule-following examples (Prompt 2) further improved success to 76-77\%. The Final Prompt (two-step co-generative) achieved the highest success rates across all conditions. At temperature 0.5, the Final Prompt achieved 88\% success with gpt-4o-nov and 90\% with gpt-4o-aug. At temperature 0.5, this represents an exact
+26-percentage-point improvement over the matched Baseline for both
+model snapshots and an 8--10-point improvement over Prompt~5, its
+closest single-step counterpart. This matched 26-point gap quantifies
+the combined difference associated with DesignFix's context
+augmentation and two-step generation--- same-codebase rule-satisfying examples, scoped surrounding context,
 and two-step generation --- over handing the same violation directly to a foundation model.
 
 
@@ -1085,7 +1126,7 @@ Final & gpt-4o-aug & 88 & 87 & 82 \\
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{explanation_passrate.png}
-  \caption{Explanation Pass Rate across three prompt variations and
+  \caption{Explanation Pass Rate across four prompt variations and
   three temperature parameters. Prompts earlier than Prompt~3 are
   omitted because they did not generate explanations.}
   \Description{A grouped bar chart comparing explanation pass rates
@@ -1094,7 +1135,9 @@ Final & gpt-4o-aug & 88 & 87 & 82 \\
 \end{figure}
 
 \textbf{Explanation Pass Rate.} Figure~\ref{fig:explanation-passrate} presents explanation pass rates for prompts that generated explanations (Prompts 3-5 and Final). The Final Prompt achieved 89\% explanation correctness with gpt-4o-nov at temperature 0.5, compared to 76-77\% for Prompt 3.
-We observed that incorrect explanations fell into several categories: misidentifying the specific rule being violated (18\% of errors), correctly identifying the rule but incorrectly explaining why the code violated it (42\%), and providing explanations that did not match the suggested fix (40\%). The two-step approach reduced all three error types, with the largest reduction in explanation-fix mismatches.
+Observed explanation failures included misidentifying the applicable
+rule, incorrectly explaining why the code violated it, and producing
+an explanation inconsistent with the proposed patch. The two-step approach reduced all three error types, with the largest reduction in explanation-fix mismatches.
 
 \begin{comment}
 \begin{table}[t]
@@ -1128,14 +1171,23 @@ Final & gpt-4o-aug & 89 & 85 & 85 \\
   \label{fig:surrounding-passrate}
 \end{figure}
 
-\textbf{Surrounding Code Pass Rate.} Figure~\ref{fig:surrounding-passrate} presents surrounding code pass rates, measured for prompts that output surrounding context (Prompts 4, 5, and Final). The final prompt achieved 90\% at temperature 0.5 with gpt-4o-nov, substantially outperforming Prompts 4 (76\%) and 5 (80\%).
+\textbf{Surrounding Code Pass Rate.} Figure~\ref{fig:surrounding-passrate} presents Surrounding Code Pass
+Rates from Prompt~4 onward, when preservation became an explicit
+evaluation concern. Prompt~4 supplied surrounding context as input,
+whereas Prompt~5 and Final generated integrated repair code. The final prompt achieved 90\% at temperature 0.5 with gpt-4o-nov, substantially outperforming Prompts 4 (76\%) and 5 (80\%).
 This metric proved important because earlier prompts sometimes made unintended modifications to surrounding code when asked to include it in the output, such as removing necessary import statements. Finding~3 quantifies these unintended-modification categories and the reduction achieved by the two-step approach.
 
 
 \subsection{Key Findings}
 \label{sec:evaluation-one-findings}
 % Add subsection text here.
-\textbf{Finding 1: Rule-following examples substantially improve fix quality.} Providing an example of code that  follows the design rule (Prompt 2 onward) improved success rates by 8-13 percentage points over the code-only approach. The example serves as a template that the model can adapt to the specific violation context. Examples from the same codebase were more effective than generic examples, likely because they demonstrate project-specific conventions such as naming patterns, import structures, and framework-specific idioms. %For the CrowdCode rules involving Objectify annotations, examples showing the exact annotation syntax and placement were critical for producing correct fixes.
+\textbf{Finding 1: Rule-following examples substantially improve fix
+quality.} Across the six matched model--temperature conditions,
+Prompt~2, which included a rule-satisfying example, exceeded Prompt~1
+by 7--10 percentage points for Code Fix Success. At temperature 0.5,
+the gains were 8 points for gpt-4o-nov and 7 points for gpt-4o-aug.
+The example provides a concrete implementation of the rule that exposes
+project-specific naming, import, framework, and structural conventions.
 
 \textbf{Finding 2: Structured output requires careful prompting.} Requesting JSON output (Prompt 3) sometimes led to format deviations or extra text outside the JSON structure in 15\% of cases. Common issues included markdown formatting around JSON blocks, explanatory preambles before the JSON, and incomplete JSON due to token limits. The two-step approach mitigated this by separating reasoning from formatting, reducing format errors to under 3\%. This suggests that constraining output format early in the generation process interferes with the model's reasoning capabilities.
 
@@ -1159,10 +1211,20 @@ extract only the relevant fix from its initial reasoning.
 
 %\textbf{Finding 3: Surrounding context is a double-edged sword.} Providing surrounding code as input (Prompt 4) helped the model understand context and produce fixes that integrated correctly, improving integration success by 3-14 percentage points across model versions, from Prompt 4 to the final prompt. However, requesting surrounding code in the output sometimes led to unintended modifications: the model would ``improve'' variable names, add unsolicited comments, or refactor unrelated code. The two-step approach reduced unintended modification rates from 24\% to 10\% by encouraging the model to extract only the relevant fix from its initial reasoning.
 
-\textbf{Finding 4: The two-step approach consistently outperforms single-shot prompts.} The Final Prompt improved over Prompt 5 by 8-10 points for code fix success, 5-7 for Explanation Pass Rate, and 10-12 for Surrounding Code Pass Rate, consistent with the rationale for separating reasoning from formatting (Section~\ref{sec:two-step-prompting}). The trade-off is slightly higher latency from two API calls, which proved acceptable in practice (adding 3-5 seconds to response times).
-%\textbf{Finding 4: The two-step approach consistently outperforms single-shot prompts.} Across all metrics and conditions, the Final Prompt achieved the best results. The improvement over Prompt 5 (the best single-shot variant) was 8-10 percentage points for code fix success, 5-7 points for explanation correctness, and 10-12 points for surrounding code preservation. We hypothesize that the two-step approach works because it (a) removes formatting pressure during the reasoning phase, (b) provides a self-review opportunity during restructuring, and (c) allows the model to use chain-of-thought reasoning naturally before producing structured output.
+\textbf{Finding 4: The two-step approach consistently outperforms
+single-shot prompts.} Final achieved the highest observed rate in all
+18 model--temperature--metric combinations. At temperature 0.5, it
+improved over Prompt~5 by 8--10 points for Code Fix Success, 4--7
+points for Explanation Correctness, and 10--11 points for Surrounding
+Code Pass Rate. The trade-off is a second API call, which added a few
+seconds in the observed runs.
 
-\textbf{Finding 5: Lower temperatures produce better, more consistent results.} Temperature 0.5 consistently outperformed higher temperatures across all metrics, with improvements of 2-5 percentage points over temperature 1.0. Additionally, the variance in results decreased at lower temperatures, making outcomes more predictable. At temperature 0.5, the standard deviation of success rates across trials was 3.2\%, compared to 7.8\% at temperature 1.0.
+\textbf{Finding 5: Lower temperatures generally produce stronger
+results.} Temperature 0.5 produced the highest or tied-highest pass
+rate in 27 of the 28 prompt--model--metric series. The exception was
+Prompt~5's Surrounding Code Pass Rate with gpt-4o-aug, which reached
+81\% at temperature 0.75 compared with 78\% at 0.5. We therefore use
+0.5 as the best-performing tested reasoning temperature.
 
 \section{Evaluation II: User Study}
 \label{sec:user-study}
@@ -1174,67 +1236,95 @@ To understand how DesignFix affects developer task performance, we conducted a w
 % Add subsection text here.
 \textbf{Participants.} We recruited 14 participants with diverse software engineering backgrounds through academic and professional networks. The cohort included PhD students in Computer Science (n=10), professional software engineers (n=3), and a recent CS graduate (n=1). Their specializations spanned software development, machine learning and NLP, network security, VR development, FinTech, and university lecturing. Professional industry experience ranged from 0 to 12 years, with a median of 2.0 years. All participants had experience with Java and were familiar with object-oriented design patterns, though none had prior experience with the specific codebase used in the study. This selection ensured participants had sufficient technical skill to complete the tasks while also being unfamiliar with the codebase, simulating the common scenario of joining a new project.
 
-\textbf{Tasks.} Participants worked with the CrowdCode codebase described in Section~\ref{sec:evaluation-one-method}. We selected rules covering command patterns, persistence, and architectural constraints, organized into pairs of comparable complexity.
-%\textbf{Tasks.} Participants worked with CrowdCode, a web-based crowdsourcing platform for software development. The codebase implements a microtask architecture where complex software tasks are broken into small, independent units (microtasks) coordinated through a graph of artifacts such as functions, tests, and reviews. The codebase uses Google App Engine with the Objectify framework and contains design rules related to command patterns, entity persistence, and artifact relationships. The codebase consists of approximately 45,000 lines of Java code across 380 classes. 
-Each task required the participant to identify and fix a specific design rule violation in the CrowdCode codebase, modifying the relevant source files to bring the code into compliance with the rule while maintaining consistency with existing codebase patterns.
+\textbf{Tasks and task selection.}
+Participants worked with the CrowdCode codebase described in
+Section~\ref{sec:evaluation-one-method}. The candidate pool consisted
+of the 15 project-specific CrowdCode rules previously elicited and
+encoded in the ActiveDocumentation work
+~\cite{mehrpour2019active}. We used these existing rule definitions
+without modification.
 
+Both authors purposively selected eight study rules after inspecting
+the Evaluation~I outcomes. We included rules associated with
+unsuccessful repairs and then filled the remaining study set with the
+most difficult rules associated with successful repairs. Difficulty was
+assessed using the expected number of lines requiring modification, the
+amount of codebase understanding needed beyond the reported violation,
+and the architectural or cross-file reasoning required. The authors
+then organized the eight rules into four pairs judged comparable using
+these criteria.
 
-
-%\textbf{Codebase.} Participants worked with CrowdCode, a web-based crowdsourcing platform for software development. The codebase implements a microtask architecture where complex software tasks are broken into small, independent units (microtasks) coordinated through a graph of artifacts such as functions, tests, and reviews. The codebase uses Google App Engine with the Objectify framework and contains design rules related to command patterns, entity persistence, and artifact relationships. The codebase consists of approximately 45,000 lines of Java code across 380 classes.
-
-%\textbf{Design Rule Sets.} We selected 8 rules covering command patterns, persistence, and architectural constraints, organized into 4 pairs of comparable complexity.
-
-\begin{comment}
-\begin{itemize}
-\item \textit{Set 1:} Rule 1 (Command static methods must construct the right Command subclass) + Rule 2 (Every Command subclass must implement execute). These rules ensure the command pattern is correctly implemented.
-\item \textit{Set 2:} Rule 3 (Artifact subclasses must be annotated @Entity) + Rule 4 (Microtasks must hold a reference to their owning Artifact). These rules ensure proper persistence and artifact relationships.
-\item \textit{Set 3:} Rule 6 (Artifact-to-artifact communication must be indirected through Commands) + Rule 7 (Artifact creation should only happen via its Create Command). These architectural rules ensure proper distribution in the sharded system.
-\item \textit{Set 4:} Rule 8 (Only DTOs should be serialized; keep ObjectMapper out of entities) + Rule 10 (save() must be immediately followed by now()). These rules ensure proper data handling.
-\end{itemize}
-\end{comment}
-
-\begin{comment}
-\textbf{Study Design.} We used a within-subjects design in which each participant completed two design-rule-repair tasks: one in the without DesignFix condition and one in the DesignFix condition. In both conditions, participants worked on the CrowdCode repository using Visual Studio Code and had access to the ActiveDocumentation design-rule checker. The checker presented the detected violation, including the rule description, categorization tags, violating code snippet, and file path, upon clicking.
-
-In the without DesignFix condition, participants repaired the reported violation using the checker output and the repository. They did not have access to DesignFix’s rule-satisfying example, extracted repair context, generated explanation, proposed patch, or diff-review interface. In the DesignFix condition, participants used the same repository and checker output together with these DesignFix features.
-
-Browser-based conversational LLMs, including ChatGPT, Claude.ai, and Gemini, were permitted in the without DesignFix condition. In-IDE agentic coding assistants, including Cline, and Claude Code etc., were prohibited in both conditions. 
-
-Each participant was randomly assigned one of four rule sets. Within each set, one rule was assigned to the without DesignFix condition and the other to the DesignFix condition. Condition order was counterbalanced across participants.
-\end{comment}
+Each task required the participant to repair one assigned seeded
+violation while preserving the surrounding program and CrowdCode's
+project-specific conventions. This was an outcome-informed,
+purposively selected task set rather than a random sample of CrowdCode
+rules.
 
 \textbf{Study Design.}
 We used a within-subjects design in which each participant completed
-two design-rule-repair tasks: one in the without DesignFix condition
-and one in the DesignFix condition. In both conditions, participants
-worked on the CrowdCode repository using Visual Studio Code and had
-access to the ActiveDocumentation design-rule checker. When a
-participant selected a violation, the checker displayed the rule
-description, categorization tags, and violating code snippet.
+two design-rule-repair tasks: one in the checker-centered condition
+(without DesignFix) and one in the DesignFix condition.
 
-The checker localized the violation site but did not necessarily
-identify the repair site. For some cross-file architectural rules, the
-code triggering the violation and the program element requiring
-modification were located in different files.
+In both conditions, participants used Visual Studio Code, the same
+CrowdCode repository, and the ActiveDocumentation checker. The checker
+displayed the rule description, categorization tags, violating snippet,
+and file path. Clicking the reported violation opened the corresponding
+file in Visual Studio Code at the reported location. Thus, both
+conditions received violation-site localization, although the reported
+location was not necessarily the program element that needed to be
+modified.
 
-In the without DesignFix condition, participants used the checker
-output and repository to determine the appropriate repair site and
-implementation. They did not receive DesignFix's rule-satisfying
-example, extracted repair context, generated explanation, proposed
-patch, or diff-review interface. In the DesignFix condition,
-participants used the same repository and checker together with these
-DesignFix features. DesignFix could therefore suggest both a repair
-location and an implementation, including for cross-file repairs.
+In the checker-centered condition, participants used the checker
+output, repository, and permitted browser-based resources to determine
+the repair location and implementation. They did not receive
+DesignFix's same-project satisfying example, extracted repair context,
+generated explanation, proposed patch, or review interface.
+
+In the DesignFix condition, participants received the same repository,
+rule material, checker output, and file-opening affordance together
+with the complete DesignFix bundle: a same-project satisfying example,
+extracted context, generated explanation, repair-site guidance,
+proposed patch, and review interface. Neither condition was given the
+correct repair for a study task.
 
 Browser-based conversational LLMs, including ChatGPT, Claude.ai, and
-Gemini, were permitted in the without DesignFix condition. Autonomous
-in-IDE coding assistants were prohibited in both conditions.
+Gemini, were permitted in the checker-centered condition. In-IDE coding
+assistants were prohibited in both conditions. Their uses included requesting definitions and conceptual
+clarifications, debugging or validating tentative changes, and, in
+some cases, generating a candidate repair.
 
-\textbf{Procedure.} The study was conducted remotely through video conferencing and screen sharing. Before beginning either task, all participants received the same 10-minute introduction to design rules and the CrowdCode codebase, followed by the same 5-minute tutorial covering the without DesignFix and with DesignFix workflow. The instructional content and demonstration were identical across participants, irrespective of condition order.
+The checker-centered comparator represents the existing workflow that
+DesignFix augments; it is not a no-support baseline. The comparison
+therefore estimates the effect of the integrated DesignFix bundle and
+does not isolate the contribution of any single component or compare
+LLM access with no LLM access.
 
-Each task had a 20-minute time limit. Participants were instructed to fix the violation while maintaining consistency with the codebase patterns. After each task, participants completed the NASA Task Load Index (NASA-TLX) questionnaire~\cite{hart1988development} and answered semi-structured interview questions about their experience, strategies, and challenges. Sessions were screen-recorded with participant consent for later analysis.
+\textbf{Procedure.}
+The study was conducted remotely through video conferencing and screen
+sharing. Before either task, every participant received the same
+10-minute introduction to design rules and CrowdCode, followed by the
+same 5-minute tutorial covering both the checker-centered and DesignFix
+workflows. The instruction did not disclose the correct repairs for the
+study tasks.
 
-Although browser-based conversational LLMs were permitted, 7 of 14 participants used one during the without DesignFix task. These participants used ChatGPT and Claude primarily for generating a candidate repair. The remaining participants relied on repository exploration, web search, and the rule checker. Because LLM use was participant-directed rather than experimentally assigned, we report it descriptively and do not interpret differences between users and non-users causally.
+During the DesignFix task, the reasoning step used
+\textit{gpt-4o-2024-11-20} at temperature 0.5, and the structured
+extraction step used temperature 0.2.
+
+Each task had a 20-minute limit. Before every task, the facilitator
+restored the working repository from the same seeded backup using
+Robocopy. The backup contained all seeded study violations, and
+participants were instructed to address only their assigned violation.
+After each task, the working copy was discarded and restored before
+subsequent use. This prevented edits made by a preceding participant or
+task from carrying forward.
+
+Participants were instructed to repair the assigned violation while
+preserving the project's existing conventions. After each task, they
+completed the NASA Task Load Index (NASA-TLX)
+~\cite{hart1988development} and answered semi-structured questions
+about their strategies, experience, and difficulties. Sessions were
+screen-recorded with participant consent.
 
 \begin{comment}
 \textbf{Violation and Repair Locations}
@@ -1245,10 +1335,21 @@ In without DesignFix condition, participants received the violating snippet from
 
 \textbf{Measures.} We collected:
 \begin{itemize}
-\item \textit{Time to completion:} Time from task start until participant declared completion or reached the 20-minute limit
-\item \textit{Correctness:} Whether the fix resolved the violation without introducing new errors, verified by running the rule checker and manual inspection
-\item \textit{NASA-TLX scores:} Six dimensions of workload (mental demand, physical demand, temporal demand, performance, effort, frustration), each rated 1-21
-%\item \textit{Qualitative feedback:} Interview responses about strategies, challenges, tool support, and tool suggestions 
+\item \textit{Task duration:} Time from task start until the participant
+declared completion, explicitly stopped working, or reached the
+20-minute limit. Because this endpoint includes unsuccessful attempts,
+it is not equivalent to time to a correct repair.
+
+\item \textit{Repair correctness:} A submitted repair was labeled
+correct only if (a) the checker no longer reported the assigned
+violation, (b) the project compiled successfully.
+The first author assessed submissions without access to explicit
+condition labels, using the checker result, build result, and a diff
+against the original seeded snapshot.
+
+\item \textit{NASA-TLX scores:} Six workload dimensions---mental
+demand, physical demand, temporal demand, performance, effort, and
+frustration---each rated from 1 to 21.
 \end{itemize}
 
 \subsection{Quantitative Results}
@@ -1266,10 +1367,19 @@ In without DesignFix condition, participants received the violating snippet from
   \label{fig:task-completion}
 \end{figure}
 
-\textbf{Task Completion Time.} Participants completed tasks faster in the DesignFix condition. The mean completion time was 10.00 minutes (SD=1.80) with DesignFix compared to 15.71 minutes (SD=3.02) without DesignFix (Table~\ref{tab:time}). A paired-samples t-test confirmed this difference was statistically significant (t(13)=9.57, p$<$0.001), with a very large effect size (Cohen's d=2.56). The time reduction of 5.71 minutes represents a 36.4\% improvement in task efficiency.
+\textbf{Task Duration.}
+Recorded task duration was lower in the DesignFix condition~\ref{tab:time}. Mean
+duration was 10.00 minutes (SD=1.80) with DesignFix and 15.71 minutes
+(SD=3.02) without DesignFix. A paired-samples t-test found a significant
+difference ($t(13)=9.57$, $p<0.001$), with a paired standardized effect
+of $d_z=2.56$. The 5.71-minute difference corresponds to a 36.4\%
+shorter mean recorded duration. Because the endpoint included
+unsuccessful declarations, early stopping, and the 20-minute limit,
+these results concern task duration rather than time to a successful
+repair.
 
 \begin{table*}[t]
-  \caption{Task Completion Time in Minutes}
+  \caption{Task Duration in Minutes}
   \label{tab:time}
   \centering
   \begin{tabular}{lccccc}
@@ -1287,10 +1397,12 @@ In without DesignFix condition, participants received the violating snippet from
   \end{tabular}
 \end{table*}
 
-From Figure~\ref{fig:task-completion} it can be observed that all 14 participants completed their task faster in the DesignFix condition. Individual time reductions ranged from 2 minutes (P7, 14\%) to 11 minutes (P4, 55\%). Notably, P4 reached the 20-minute time limit without DesignFix and failed to produce a correct fix, yet completed the task in the DesignFix condition in 9 minutes with a correct solution. The consistency of improvement across participants, regardless of experience level, suggests that the benefits are robust across developer profiles.
-The variance in completion times was also notably lower in the DesignFix condition (SD=1.80 vs. SD=3.02). This indicates that DesignFix helps normalize performance across participants with varying experience levels.
 
-\textbf{Correctness.} Participants achieved higher correctness rates in the DesignFix condition. In the DesignFix condition, 13 of 14 participants (92.9\%) produced correct fixes that resolved the design rule violation. In the without DesignFix condition, only 6 of 14 participants (42.9\%) produced correct fixes. This improvement was statistically significant (exact McNemar's test, $p = 0.016$). Of the seven participants whose outcome changed between conditions, all seven improved (failed without DesignFix but succeeded with it), while none worsened.
+\textbf{Repair Correctness.}
+Under the correctness criteria described above, 13 of 14
+participants (92.9\%) produced a correct repair in the DesignFix
+condition, compared with 6 of 14 participants (42.9\%) in the
+checker-centered condition. This improvement was statistically significant (exact McNemar's test, $p = 0.016$). Of the seven participants whose outcome changed between conditions, all seven improved (failed without DesignFix but succeeded with it), while none worsened.
 
 %Analysis of the McNemar's contingency table reveals the pattern of change: 7 participants improved (failed without DesignFix but succeeded with it), 6 participants succeeded in both conditions, 0 participants worsened, and 1 participant (P8) failed in both conditions. The absence of any participants who succeeded without DesignFix but failed with it suggests that the tool does not introduce new failure modes for developers who already possess sufficient codebase knowledge.
 
@@ -1364,7 +1476,7 @@ performance across participants regardless of background.
 \subsection{Qualitative Findings}
 \label{sec:user-study-qualitative}
 % Add subsection text here.
-We conducted a detailed analysis of interview transcripts, post-task questionnaire responses, and screen recordings. We identified six major themes.
+We conducted a detailed analysis of interview transcripts, post-task questionnaire responses, and screen recordings. We identified five major themes.
 
 \textbf{Theme 1: Navigation Dominates Task Difficulty.} The most universally valued feature was DesignFix's ability to identify specific file locations and code segments, mentioned by all 14 participants. Screen recording analysis revealed participants spent an average of 4.9 minutes before their first code modification in the without DesignFix condition, compared to 2.1 minutes with DesignFix.
 This reveals that DesignFix's primary value lies in \textit{codebase navigation} rather than code generation. P1 spent the first 10 minutes of the without-DesignFix task searching the web for documentation, finding only unrelated examples instead of guidance specific to this codebase's design rules.
@@ -1452,14 +1564,6 @@ P10 experienced state management issues:
 
 %\textit{``I clicked `Suggest Fix' twice and got two different suggestions... suddenly I had multiple `Untitled' tabs open. It became messy very quickly.''} 
 
-
-
-The most requested improvement (13/14 participants) was diff-style highlighting showing original vs. modified code after accepting changes. P7 explained: 
-\pquote{P7}{with DesignFix}{I would have preferred red/green highlighting between the original and modified code blocks to spot the change instantly in the original file content.}
-
-
-%\textit{``I would have preferred red/green highlighting between the left and right panes to spot the change instantly.''}
-
 Nine participants requested multi-violation scanning to identify all related violations at once. Seven participants suggested surfacing related patterns from the codebase to enable verification against existing correct examples.
 
 %\noindent Other participants suggested workflow improvements such as keyboard shortcuts to accept changes to reduce context switching.
@@ -1494,12 +1598,49 @@ The tool actually gave me a bad patch - it suggested a direct call which was a v
 \section{Threats to Validity}
 \label{sec:threats}
 % Add section text here.
-\textit{Study design and generalizability.} The within-subjects design controls for individual differences but may introduce order effects; we counterbalanced both rule assignment and task order to mitigate this. Three participants who timed out or gave up in the without DesignFix condition could inflate the time difference, though their failures reflect genuine task difficulty. The three development violations reused in the 45-violation evaluation set could introduce slight optimistic bias, but prompt refinements targeted general strategies rather than violation-specific tuning.
-Our user study used a single codebase (CrowdCode) with Java-specific design rules; results may differ for other languages, frameworks, or rule types. The participant pool skewed toward PhD students, and all were unfamiliar with the codebase by design, which does not capture how DesignFix would perform for developers with partial familiarity. LLM evaluation used GPT-4o exclusively; optimal prompting strategies may not transfer across providers. Moreover, correctness was measured as a binary outcome, which does not capture partial fixes. 
+\textit{Study design, task selection, and generalizability.}
+The within-subjects design reduces between-participant variation but
+introduces possible order, learning, and carryover effects. Condition
+order was counterbalanced, but rule assignment was not fully
+counterbalanced: some rules occurred only in one condition and others
+were unevenly distributed. Consequently, condition effects may be
+partly confounded with rule difficulty.
 
-\textit{Tool-access and condition-design bias.} The with and without DesignFix conditions differed not only in generated repair content but also in workflow integration. DesignFix embedded project-specific context, explanation, repair generation, and review within the repair process, whereas participants in the without DesignFix condition had to coordinate the checker, repository exploration, and any optional conversational LLM use themselves (Section~\ref{sec:user-study-method}). Consequently, the study compares DesignFix with the existing checker-centered workflow rather than with the strongest contemporary autonomous coding-agent workflow, and participants accustomed to integrated agentic tools may have been disadvantaged in the without DesignFix condition. We address this limitation through a separate repository-aware agentic baseline.
+The tasks were purposively selected by both authors using
+Evaluation~I outcomes and author-assessed difficulty criteria rather
+than randomly sampled from the 15 CrowdCode rules. Conditioning task
+selection on observed repair outcomes can influence the estimated
+effect, while subjective task pairing may leave residual difficulty
+differences between conditions. The reported results should therefore
+be interpreted as evidence for these eight selected tasks rather than
+as an unbiased estimate across all CrowdCode rules.
 
-\textit{Tutorial equivalence.} All participants received the same checker and DesignFix instruction before beginning the corresponding condition. However, because condition order was counterbalanced, participants may have gained repository familiarity from their first task that benefited their second task.
+Three prompt-development violations were also retained in the
+45-violation Evaluation~I dataset, which may introduce optimistic bias.
+We report held-out results separately to make this effect visible. 
+
+\textit{Tool-access and condition-design bias.}
+We chose the checker-centered comparator because it represents the
+existing workflow that DesignFix augments. Participants received the
+rule, violating snippet, file path, click-to-open violation
+localization, source repository, tutorial, and optional browser-based
+tools. DesignFix added an integrated bundle of same-project examples,
+focused context, explanation, repair-site guidance, proposed code, and
+review support.
+
+Accordingly, the study estimates the difference between these two
+workflows. It neither isolates the contribution of individual
+DesignFix features nor compares LLM access with no LLM access.
+Browser-LLM use in the checker-centered condition was self-selected,
+creating additional heterogeneity that we report descriptively rather
+than interpreting causally.
+
+\textit{Tutorial equivalence and carryover.}
+All participants were taught both workflows before either task. This
+equalized initial instruction but may have introduced cross-condition
+contamination. Completing the first task could also provide repository
+knowledge that carried into the second task; counterbalancing condition
+order mitigates but does not eliminate this possibility.
 
 \textit{Rule-language expressiveness.} DesignFix inherits the
 expressiveness limits of its rule checker. srcML encodes only
@@ -1514,25 +1655,27 @@ properties~\cite{mehrpour2020rulepad}. Design rules requiring such
 analyses are outside the rule language and were not part of our
 evaluation.
 
-\textit{Single-rater labeling.} Explanation Correctness and
-Surrounding Code Pass Rate were labeled by a single rater (the first
-author) applying a fixed rubric, and we did not measure inter-rater
-reliability; we acknowledge its absence as a threat to construct
-validity~\cite{mcdonald2019reliability}. Single-coder labeling is
-considered acceptable when coding requires limited interpretation
-against predefined criteria~\cite{mcdonald2019reliability}, and both
-metrics anchor on tool-checked outcomes (the rule-checker re-run and
-the scoped diff). We release all LLM outputs and labels in our
-replication package so the labeling can be independently audited.
-Nevertheless, a second rater could judge borderline cases
-differently, and the reported percentages should be read with this
-caveat.
+\textit{Single-rater assessment.}
+Explanation Correctness and Surrounding Code Pass Rate in Evaluation~I,
+and repair correctness in the user study, were assessed by the first
+author using predefined rubrics. We did not measure inter-rater
+reliability, which is a threat to construct validity
+~\cite{mcdonald2019reliability}.
+
+Checker compliance and user-study compilation were tool-checked, but
+determining explanation correctness and whether a modification was
+unrelated or unnecessary required human judgment. Explicit condition
+labels were withheld while study repairs were assessed; however,
+masking may have been incomplete because task identity and patch
+content could provide condition cues. A second rater might classify
+borderline cases differently. We release the rubrics, outputs, diffs,
+and labels so that these judgments can be independently audited.
 
 
 \section{Discussion}
 \label{sec:discussion}
 % Add section text here.
-The integrated DesignFix workflow produced a large and consistent reduction in task completion time (Section~\ref{sec:user-study-quantitative}).
+On the selected tasks, participants had shorter recorded task durations with the integrated DesignFix workflow. 
 %\subsection{The Navigation Burden in Unfamiliar Codebases}
 This difference reflects the combined support provided by project-specific context, repair-site identification, explanation, proposed code, and review; not merely access to an LLM. Participants in the without DesignFix condition spent more than twice as long before making their first code modification (Theme~1, Section~\ref{sec:user-study-qualitative}), and several edited entirely wrong files without realizing their error. This suggests that design rule violation repair is primarily a \textit{navigation and comprehension} problem rather than a coding problem. DesignFix's primary value may therefore lie in codebase navigation and pattern identification rather than code generation.
 
@@ -1547,9 +1690,20 @@ The P14 case, where DesignFix provided incorrect code but a correct explanation,
 \section{Conclusions}
 \label{sec:conclusion}
 % Add section text here.
-By leveraging LLMs, augmented with relevant context identified through lightweight static analysis, DesignFix assists developers in interpreting and repairing design violations. Rather than simply providing a fix, offering tailored explanations and examples helps developers effectively calibrate trust, validate fixes, and recover from incorrect suggestions.  
-%We presented DesignFix, an LLM-assisted approach for interpreting and repairing design rule violations. A systematic evaluation of prompting strategies across 9,450 model runs identified a two-step co-generative approach as optimal, and a user study demonstrated significant improvements in task completion time, correctness, and cognitive workload. Qualitative analysis revealed that DesignFix's primary value lies in precise codebase navigation rather than code generation, and that its verification affordances --- particularly the separation of explanations from code suggestions --- enable developers to calibrate trust and recover from incorrect suggestions. 
-Future work should explore multi-file fixes, long-term learning effects, and generalization across LLM providers.
+We presented DesignFix, an IDE-integrated workflow that transforms
+checker-reported design-rule violations into project-grounded
+explanations and reviewable repairs. Across 9,450 trials, the strongest
+tested workflow achieved up to 90\% repair success, 89\% explanation
+correctness, and 90\% preservation of unrelated code. In a
+14-participant within-subjects study, DesignFix reduced mean task
+duration by 36\%, increased correct repairs from 43\% to 93\%, and
+significantly reduced five of six NASA-TLX dimensions. Together, these
+results show that effective LLM support for design-rule repair extends
+beyond generating code: connecting a violation to the relevant project
+context, repair site, explanation, and review workflow can make
+unfamiliar design constraints substantially easier to understand and
+act upon. Future work should investigate multi-file repairs, longer-term
+use, and generalization across additional codebases and LLM providers.
 
 \section{Data Availability Statement}
 \label{sec:data-availability}

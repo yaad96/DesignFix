@@ -11,6 +11,7 @@ import { writeToFile, convertToXML, findFileAndReadContent } from './utilites';
 
 import { reconcile, describeReconcile, ReconcileResult } from './reconcile';
 import { codeLensChangeEmitter } from './extension';
+import { sourceSnapshotsEqual } from './sourceSnapshot';
 
 export interface DiffChunk {
     range: vscode.Range;
@@ -24,6 +25,11 @@ export interface DiffChunk {
     // Used to scope the Accept/Reject CodeLenses to the correct diff tab when a
     // multi-file fix opens several diff views at once.
     modifiedUri?: string;
+    // Every file in one suggested fix shares a stable review id. Accept/reject
+    // operates on the whole group so cross-file changes cannot be half-applied.
+    reviewId: string;
+    schemaVersion?: number;
+    operation?: string;
 }
 export const diffChunks: DiffChunk[] = [];
 
@@ -43,6 +49,7 @@ export class FollowAndAuthorRulesProcessor {
     private ruleTable: any[]; // Consider using a more specific type
     private tagTable: Tag[];
     private currentProjectPath: string;
+    private reviewSequence = 0;
     public readonly wsMessages: string[] = [
         WebSocketConstants.RECEIVE_EDIT_FIX,
         WebSocketConstants.SEND_CONTENT_FOR_EDIT_FIX,
@@ -122,8 +129,21 @@ export class FollowAndAuthorRulesProcessor {
         this.loadRuleTable();
     }
 
-    private normalizeNewlines(text: string): string {
-        return text.replace(/\r\n/g, '\n');
+    private nextReviewId(): string {
+        this.reviewSequence += 1;
+        return `${Date.now()}-${this.reviewSequence}`;
+    }
+
+    private resolveWorkspaceTarget(targetPath: string): string {
+        const workspaceRoot = path.resolve(this.currentProjectPath);
+        const resolved = path.resolve(path.isAbsolute(targetPath)
+            ? targetPath
+            : path.join(workspaceRoot, targetPath));
+        const relative = path.relative(workspaceRoot, resolved);
+        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+            throw new Error(`Fix target is outside the active workspace: ${targetPath}`);
+        }
+        return resolved;
     }
 
     public getRuleTableForClient(): string {
@@ -795,7 +815,10 @@ export class FollowAndAuthorRulesProcessor {
         originalContent: string,
         rec: ReconcileResult,
         explanation: string,
-        showNotification: boolean
+        showNotification: boolean,
+        reviewId: string,
+        schemaVersion?: number,
+        operation?: string,
     ): Promise<void> {
         const fileName = path.basename(targetPath);
         const patchedDoc = await vscode.workspace.openTextDocument({
@@ -820,7 +843,10 @@ export class FollowAndAuthorRulesProcessor {
             filePath: targetPath,
             startOffset: 0,
             endOffset: patchedTextNow.length,
-            modifiedUri: patchedDoc.uri.toString()
+            modifiedUri: patchedDoc.uri.toString(),
+            reviewId,
+            schemaVersion,
+            operation,
         });
         await vscode.commands.executeCommand('setContext', 'designfix.reviewActive', true);
         codeLensChangeEmitter.fire();
@@ -940,12 +966,10 @@ export class FollowAndAuthorRulesProcessor {
             }
         }
 
-        // Multi-file fix: the LLM changed two or more files (e.g. a cross-file
-        // rule whose fix touches both the violation file and a registry file).
-        // Apply each edit directly; the FileSystemWatcher then reconverts and
-        // re-checks automatically, updating the web app.
-        if (Array.isArray(data.edits) && data.edits.length >= 2) {
-            await this.applyMultiFileEdits(data.edits, data.explanation);
+        // Structured edit batch. One or more files are reviewed as a single
+        // transaction; nothing reaches disk until the complete group is accepted.
+        if (Array.isArray(data.edits) && data.edits.length >= 1) {
+            await this.applyMultiFileEdits(data.edits, data.explanation, data.schemaVersion);
             return;
         }
 
@@ -955,8 +979,11 @@ export class FollowAndAuthorRulesProcessor {
             return;
         }
 
-        if (!path.isAbsolute(targetPath)) {
-            targetPath = path.join(this.currentProjectPath, targetPath);
+        try {
+            targetPath = this.resolveWorkspaceTarget(targetPath);
+        } catch (error) {
+            vscode.window.showErrorMessage(`Unable to review fix: ${(error as Error).message}`);
+            return;
         }
 
         const newContentRaw: string = data.modifiedFileContent ?? '';
@@ -977,14 +1004,20 @@ export class FollowAndAuthorRulesProcessor {
             return;
         }
 
-        if (providedOriginalRaw && this.normalizeNewlines(providedOriginalRaw) !== this.normalizeNewlines(fileContent)) {
+        if (providedOriginalRaw && !sourceSnapshotsEqual(providedOriginalRaw, fileContent)) {
+            if (data.schemaVersion === 2) {
+                vscode.window.showErrorMessage(
+                    `DesignFix: ${path.basename(targetPath)} changed after the fix was generated. Regenerate the fix before reviewing it.`
+                );
+                return;
+            }
             console.warn('Provided original content does not match the current file on disk. Proceeding with on-disk version.');
         }
 
         // Layer 1: rebuild the suggestion as ORIGINAL + minimal hunks so that
         // formatting-only drift disappears and truncated LLM output cannot
         // silently delete code.
-        const rec = reconcile(fileContent, newContentRaw);
+        const rec = reconcile(fileContent, newContentRaw, { allowLargeDeletions: data.schemaVersion === 2 });
 
         if (rec.identicalAfterReconcile) {
             vscode.window.showInformationMessage(
@@ -1002,28 +1035,48 @@ export class FollowAndAuthorRulesProcessor {
             console.warn(`DesignFix reconcile: ${rec.truncationDetail}`);
         }
 
-        diffChunks.length = 0;
-        await this.openFixReview(targetPath, fileContent, rec, explanation, true);
+        await this.openFixReview(
+            targetPath,
+            fileContent,
+            rec,
+            explanation,
+            true,
+            this.nextReviewId(),
+            data.schemaVersion,
+            'modify',
+        );
     }
 
-    /**
-     * Apply a set of LLM file edits (multi-file cross-file fix). Each edit is
-     * written to disk directly after an optional confirmation; the workspace
-     * FileSystemWatcher then reconverts and re-checks the affected files.
-     */
-    private async applyMultiFileEdits(edits: any[], explanation?: string): Promise<void> {
-        const resolved: { path: string; content: string }[] = [];
+    /** Queue one validated edit batch for an atomic VS Code review. */
+    private async applyMultiFileEdits(edits: any[], explanation?: string, schemaVersion?: number): Promise<void> {
+        const resolved: { path: string; content: string; original?: string; operation?: string }[] = [];
         for (const edit of edits) {
             let p: string | undefined = edit?.filePath || edit?.fileToChange;
             const content: string = edit?.modifiedFileContent ?? edit?.code ?? '';
             if (!p || !content.trim()) {
+                if (schemaVersion === 2) {
+                    vscode.window.showErrorMessage('DesignFix: an edit is missing its path or content. Nothing was queued.');
+                    return;
+                }
                 console.warn('Skipping edit with missing path or content:', edit);
                 continue;
             }
-            if (!path.isAbsolute(p)) {
-                p = path.join(this.currentProjectPath, p);
+            if (schemaVersion === 2 && edit?.operation !== 'modify' && edit?.operation !== 'create') {
+                vscode.window.showErrorMessage(`DesignFix: unsupported edit operation for ${p}. Nothing was queued.`);
+                return;
             }
-            resolved.push({ path: p, content });
+            try {
+                p = this.resolveWorkspaceTarget(p);
+            } catch (error) {
+                vscode.window.showErrorMessage(`Unable to review fix: ${(error as Error).message}`);
+                return;
+            }
+            resolved.push({
+                path: p,
+                content,
+                original: typeof edit?.originalFileContent === 'string' ? edit.originalFileContent : undefined,
+                operation: edit?.operation,
+            });
         }
 
         if (resolved.length === 0) {
@@ -1031,22 +1084,59 @@ export class FollowAndAuthorRulesProcessor {
             return;
         }
 
-        // Show the same review UX as single-file fixes, but one native diff per
-        // changed file, each holding the RECONCILED (minimal) suggestion.
-        // Nothing is written to disk until the user accepts an individual file.
-        diffChunks.length = 0;
+        const uniquePaths = new Set(resolved.map(r => path.normalize(r.path).toLowerCase()));
+        if (uniquePaths.size !== resolved.length) {
+            vscode.window.showErrorMessage('DesignFix: the fix contains duplicate file targets. Nothing was queued.');
+            return;
+        }
 
+        // Validate the complete group before opening any review tab. Version 2
+        // edits must still target the exact base snapshots used by the client.
+        const prepared: { edit: typeof resolved[number]; originalContent: string | null }[] = [];
+        for (const edit of resolved) {
+            let originalContent: string | null = null;
+            try {
+                originalContent = await fs.readFile(edit.path, { encoding: 'utf8' });
+            } catch {
+                console.warn(`No existing file for ${edit.path}; treating it as a proposed creation.`);
+            }
+
+            if (schemaVersion === 2) {
+                if (edit.operation === 'create') {
+                    if (originalContent !== null) {
+                        vscode.window.showErrorMessage(
+                            `DesignFix: ${path.basename(edit.path)} already exists, so the create operation was rejected.`
+                        );
+                        return;
+                    }
+                } else {
+                    if (originalContent === null || typeof edit.original !== 'string') {
+                        vscode.window.showErrorMessage(
+                            `DesignFix: the base snapshot for ${path.basename(edit.path)} is unavailable. Nothing was queued.`
+                        );
+                        return;
+                    }
+                    if (!sourceSnapshotsEqual(edit.original, originalContent)) {
+                        vscode.window.showErrorMessage(
+                            `DesignFix: ${path.basename(edit.path)} changed after the fix was generated. Regenerate the complete fix.`
+                        );
+                        return;
+                    }
+                }
+            }
+
+            prepared.push({edit, originalContent});
+        }
+
+        // Keep earlier pending reviews intact. Clearing the global array here
+        // orphaned their tabs and made Accept/Reject controls disappear.
+        const reviewId = this.nextReviewId();
         let opened = 0;
         const alreadySatisfied: string[] = [];
         const truncationWarnings: string[] = [];
-        for (const r of resolved) {
-            let originalContent: string | null = null;
-            try {
-                originalContent = await fs.readFile(r.path, { encoding: 'utf8' });
-            } catch {
-                // File does not exist yet (fix creates a new file).
-                console.warn(`No existing file for ${r.path}; showing new-file content for review.`);
-            }
+        for (const item of prepared) {
+            const r = item.edit;
+            const originalContent = item.originalContent;
 
             if (originalContent === null) {
                 // New file: nothing to reconcile against - review the proposed
@@ -1062,13 +1152,16 @@ export class FollowAndAuthorRulesProcessor {
                     filePath: r.path,
                     startOffset: 0,
                     endOffset: text.length,
-                    modifiedUri: newDoc.uri.toString()
+                    modifiedUri: newDoc.uri.toString(),
+                    reviewId,
+                    schemaVersion,
+                    operation: r.operation || 'create',
                 });
                 opened++;
                 continue;
             }
 
-            const rec = reconcile(originalContent, r.content);
+            const rec = reconcile(originalContent, r.content, { allowLargeDeletions: schemaVersion === 2 });
 
             // Nothing genuinely changes (already applied, or formatting-only).
             if (rec.identicalAfterReconcile) {
@@ -1080,7 +1173,7 @@ export class FollowAndAuthorRulesProcessor {
                 console.warn(`DesignFix reconcile (${r.path}): ${rec.truncationDetail}`);
             }
 
-            await this.openFixReview(r.path, originalContent, rec, '', false);
+            await this.openFixReview(r.path, originalContent, rec, '', false, reviewId, schemaVersion, r.operation || 'modify');
             opened++;
         }
 
@@ -1089,7 +1182,7 @@ export class FollowAndAuthorRulesProcessor {
 
         if (opened > 0) {
             vscode.window.showInformationMessage(
-                `DesignFix suggested a fix across ${opened} file(s). Review each diff tab and use Accept Fix / Reject Fix.`
+                `DesignFix suggested one atomic fix across ${opened} file(s). Accepting or rejecting any tab resolves the whole fix.`
             );
             if (explanation) {
                 vscode.window.setStatusBarMessage(`LLM explanation: ${explanation}`, 8000);

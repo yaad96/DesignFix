@@ -1,7 +1,5 @@
 import * as vscode from 'vscode';
 import * as WebSocket from 'ws';
-import * as fs from 'fs';
-import { promisify } from 'util';
 import { FileChangeManager } from './FileChangeManager'; // Ensure correct path is used
 import { buildFolderHierarchy } from './utilites'; // Removed extra semicolon and corrected typo
 //import { MessageProcessor } from './MessageProcessor';
@@ -13,9 +11,8 @@ import { DoiProcessing } from './DoiProcessing';
 
 import { diffChunks, DiffChunk } from './FollowAndAuthorRulesProcessor';
 import { reconcile } from './reconcile';
+import { sourceSnapshotsEqual } from './sourceSnapshot';
 
-
-//const readFileAsync = promisify(fs.readFile);
 
 // EventEmitter to trigger CodeLens refresh (exported for use in other modules)
 export const codeLensChangeEmitter = new vscode.EventEmitter<void>();
@@ -194,32 +191,25 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             })().catch(error => console.error('Error in WebSocket connection handler:', error));
 
+            let processingQueue: Promise<void> = Promise.resolve();
             ws.on('message', (message: string) => {
-                //console.log(`Received message: ${message}`);
-                const faw = FollowAndAuthorRulesProcessor.getInstance();
-                const mr = MiningRulesProcessor.getInstance();
-                try {
+                // Serialize incoming work. Concurrent fix messages previously
+                // raced while mutating the shared review collection.
+                processingQueue = processingQueue.then(async () => {
+                    const faw = FollowAndAuthorRulesProcessor.getInstance();
+                    const mr = MiningRulesProcessor.getInstance();
                     const json = JSON.parse(message.toString());
-                    //console.log("Command:", json.command);
-                    //console.log("Data:", json.data);
-
 
                     if (faw.wsMessages.includes(json.command)) {
-                        //console.log('Received a recognized command:', json.command);
-                        faw.processReceivedMessages(message);
-                        // Handle the command as needed
+                        await faw.processReceivedMessages(message);
                     }
                     else if (mr.wsMessages.includes(json.command)) {
                         console.log("in MR");
-                        mr.processReceivedMessages(message);
+                        await mr.processReceivedMessages(message);
                     }
-                } catch (e) {
-                    console.error("Error parsing JSON:", e);
-                }
-
-
-
-
+                }).catch((error) => {
+                    console.error("Error processing WebSocket message:", error);
+                });
             });
 
             ws.on('error', (error) => {
@@ -251,20 +241,20 @@ export function activate(context: vscode.ExtensionContext) {
                 provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
                     // Only show a chunk's lenses on the diff tab it belongs to.
                     // (Legacy chunks without modifiedUri show on any untitled java doc.)
-                    return diffChunks.flatMap((chunk, i) => {
+                    return diffChunks.flatMap((chunk) => {
                         if (chunk.modifiedUri && chunk.modifiedUri !== document.uri.toString()) {
                             return [];
                         }
                         return [
                         new vscode.CodeLens(chunk.range, {
                             command: 'designfix.acceptChange',
-                            title: 'Accept Change',
-                            arguments: [i]
+                            title: 'Accept Fix (all files)',
+                            arguments: [vscode.Uri.parse(chunk.modifiedUri || document.uri.toString())]
                         }),
                         new vscode.CodeLens(chunk.range, {
                             command: 'designfix.rejectChange',
-                            title: 'Reject Change',
-                            arguments: [i]
+                            title: 'Reject Fix (all files)',
+                            arguments: [vscode.Uri.parse(chunk.modifiedUri || document.uri.toString())]
                         })
                     ];
                     });
@@ -334,10 +324,15 @@ export function activate(context: vscode.ExtensionContext) {
         }
     };
 
-    const finishChunk = async (chunk: DiffChunk): Promise<void> => {
-        const i = diffChunks.indexOf(chunk);
-        if (i >= 0) {
-            diffChunks.splice(i, 1);
+    const chunksForReview = (chunk: DiffChunk): DiffChunk[] =>
+        diffChunks.filter(candidate => candidate.reviewId === chunk.reviewId);
+
+    const finishReview = async (chunks: DiffChunk[]): Promise<void> => {
+        const completed = new Set(chunks);
+        for (let i = diffChunks.length - 1; i >= 0; i--) {
+            if (completed.has(diffChunks[i])) {
+                diffChunks.splice(i, 1);
+            }
         }
         await vscode.commands.executeCommand('setContext', 'designfix.reviewActive', diffChunks.length > 0);
         codeLensChangeEmitter.fire();
@@ -350,67 +345,170 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showWarningMessage('DesignFix: no pending fix found for this tab.');
                 return;
             }
-            const chunk = diffChunks[index];
-
-            // The right-side buffer is editable; honor any hand-edits the user made.
-            const rightDoc = vscode.workspace.textDocuments.find(d => d.uri.toString() === chunk.modifiedUri);
-            const rightText = rightDoc ? rightDoc.getText() : chunk.newText;
+            const selectedChunk = diffChunks[index];
+            const reviewChunks = chunksForReview(selectedChunk);
+            type PreparedReviewEdit = {
+                chunk: DiffChunk;
+                uri: vscode.Uri;
+                doc: vscode.TextDocument | null;
+                rightText: string;
+                originalText: string;
+                patchedText: string;
+                changed: boolean;
+                create: boolean;
+                legacyTruncation: boolean;
+            };
+            let prepared: PreparedReviewEdit[] = [];
+            let workspaceApplied = false;
 
             try {
-                let doc: vscode.TextDocument | null = null;
-                try {
-                    doc = await vscode.workspace.openTextDocument(chunk.filePath);
-                } catch {
-                    doc = null; // fix creates a new file
+                // Validate and stage every file first. Version 2 suggestions are
+                // locally materialized exact edits, so any base drift is a hard
+                // conflict rather than an invitation to fuzzy-merge.
+                for (const chunk of reviewChunks) {
+                    const rightDoc = vscode.workspace.textDocuments.find(d => d.uri.toString() === chunk.modifiedUri);
+                    const rightText = rightDoc ? rightDoc.getText() : chunk.newText;
+                    const uri = vscode.Uri.file(chunk.filePath);
+                    const create = chunk.operation === 'create';
+                    let doc: vscode.TextDocument | null = null;
+                    try {
+                        doc = await vscode.workspace.openTextDocument(uri);
+                    } catch {
+                        doc = null;
+                    }
+
+                    if (create && doc) {
+                        throw new Error(`${chunk.filePath} now exists; regenerate the fix before accepting it.`);
+                    }
+                    if (!create && !doc) {
+                        throw new Error(`${chunk.filePath} no longer exists; regenerate the fix before accepting it.`);
+                    }
+
+                    const originalText = doc ? doc.getText() : '';
+                    if (chunk.schemaVersion === 2
+                        && !sourceSnapshotsEqual(originalText, chunk.fullOriginalContent)) {
+                        throw new Error(`${chunk.filePath} changed after review opened; regenerate the entire fix.`);
+                    }
+
+                    if (chunk.schemaVersion === 2 || create) {
+                        prepared.push({
+                            chunk,
+                            uri,
+                            doc,
+                            rightText,
+                            originalText,
+                            patchedText: rightText,
+                            changed: create || originalText !== rightText,
+                            create,
+                            legacyTruncation: false,
+                        });
+                    } else {
+                        const rec = reconcile(originalText, rightText);
+                        prepared.push({
+                            chunk,
+                            uri,
+                            doc,
+                            rightText,
+                            originalText,
+                            patchedText: rec.patchedText,
+                            changed: !rec.identicalAfterReconcile,
+                            create: false,
+                            legacyTruncation: rec.truncationSuspected,
+                        });
+                    }
                 }
 
-                if (doc) {
-                    // Re-reconcile against the CURRENT document state so the applied
-                    // edit stays minimal even after hand-edits or on-disk drift.
-                    let rec = reconcile(doc.getText(), rightText);
-                    if (rec.truncationSuspected) {
-                        const pick = await vscode.window.showWarningMessage(
-                            `Applying this fix would delete ${rec.keptDeletionLines} line(s) with no replacement ` +
-                            `(possibly truncated LLM output). How should DesignFix proceed?`,
-                            { modal: true },
-                            'Keep those lines and apply',
-                            'Delete them and apply'
-                        );
-                        if (pick === undefined) { return; }
-                        if (pick === 'Delete them and apply') {
-                            rec = reconcile(doc.getText(), rightText, { allowLargeDeletions: true });
-                        }
-                    }
-                    if (rec.identicalAfterReconcile) {
-                        vscode.window.showInformationMessage(
-                            'DesignFix: the file already satisfies this suggestion; nothing to apply.'
-                        );
-                        await closeReviewTab(chunk);
-                        await finishChunk(chunk);
-                        return;
-                    }
-                    const fullRange = new vscode.Range(
-                        doc.positionAt(0),
-                        doc.positionAt(doc.getText().length)
+                if (prepared.some(item => item.legacyTruncation)) {
+                    const pick = await vscode.window.showWarningMessage(
+                        'One or more legacy suggestions may be truncated. How should DesignFix apply this atomic fix?',
+                        { modal: true },
+                        'Keep unmatched original lines',
+                        'Delete them and apply'
                     );
-                    const edit = new vscode.WorkspaceEdit();
-                    edit.replace(doc.uri, fullRange, rec.patchedText);
-                    const applied = await vscode.workspace.applyEdit(edit);
-                    if (!applied) {
-                        throw new Error('workspace edit was not applied');
+                    if (pick === undefined) { return; }
+                    if (pick === 'Delete them and apply') {
+                        prepared = prepared.map(item => {
+                            if (!item.legacyTruncation) { return item; }
+                            const rec = reconcile(item.originalText, item.rightText, { allowLargeDeletions: true });
+                            return {
+                                ...item,
+                                patchedText: rec.patchedText,
+                                changed: !rec.identicalAfterReconcile,
+                                legacyTruncation: false,
+                            };
+                        });
                     }
-                    await doc.save();
-                } else {
-                    await fs.promises.writeFile(chunk.filePath, rightText, 'utf8');
+                }
+
+                const changed = prepared.filter(item => item.changed);
+                if (changed.length === 0) {
+                    vscode.window.showInformationMessage('DesignFix: every file already satisfies this suggestion.');
+                    for (const chunk of reviewChunks) { await closeReviewTab(chunk); }
+                    await finishReview(reviewChunks);
+                    return;
+                }
+
+                // One WorkspaceEdit commits the complete review group. No file is
+                // written if any staged edit is invalid.
+                const workspaceEdit = new vscode.WorkspaceEdit();
+                for (const item of changed) {
+                    if (item.create) {
+                        workspaceEdit.createFile(item.uri, { ignoreIfExists: false, overwrite: false });
+                        workspaceEdit.insert(item.uri, new vscode.Position(0, 0), item.patchedText);
+                    } else if (item.doc) {
+                        workspaceEdit.replace(
+                            item.uri,
+                            new vscode.Range(item.doc.positionAt(0), item.doc.positionAt(item.originalText.length)),
+                            item.patchedText,
+                        );
+                    }
+                }
+
+                workspaceApplied = await vscode.workspace.applyEdit(workspaceEdit);
+                if (!workspaceApplied) {
+                    throw new Error('the atomic workspace edit was not applied');
+                }
+
+                for (const item of changed) {
+                    const savedDoc = await vscode.workspace.openTextDocument(item.uri);
+                    if (!await savedDoc.save()) {
+                        throw new Error(`could not save ${item.chunk.filePath}`);
+                    }
                 }
 
                 vscode.window.showInformationMessage(
-                    `DesignFix: changes applied to ${chunk.filePath.split(/[\\/]/).pop()}.`
+                    `DesignFix: atomic fix applied to ${changed.length} file(s).`
                 );
-                await closeReviewTab(chunk);
-                await finishChunk(chunk);
+                for (const chunk of reviewChunks) { await closeReviewTab(chunk); }
+                await finishReview(reviewChunks);
             } catch (err: any) {
-                vscode.window.showErrorMessage(`Failed to apply fix: ${err.message}`);
+                // Saving is separate from WorkspaceEdit. If it fails, restore all
+                // original snapshots and remove files created by this review.
+                if (workspaceApplied && prepared.length > 0) {
+                    try {
+                        const rollback = new vscode.WorkspaceEdit();
+                        for (const item of prepared.filter(candidate => candidate.changed)) {
+                            if (item.create) {
+                                rollback.deleteFile(item.uri, { ignoreIfNotExists: true, recursive: false });
+                            } else {
+                                const current = await vscode.workspace.openTextDocument(item.uri);
+                                rollback.replace(
+                                    item.uri,
+                                    new vscode.Range(current.positionAt(0), current.positionAt(current.getText().length)),
+                                    item.originalText,
+                                );
+                            }
+                        }
+                        await vscode.workspace.applyEdit(rollback);
+                        for (const item of prepared.filter(candidate => candidate.changed && !candidate.create)) {
+                            const restored = await vscode.workspace.openTextDocument(item.uri);
+                            await restored.save();
+                        }
+                    } catch (rollbackError) {
+                        console.error('Failed to roll back atomic DesignFix edit:', rollbackError);
+                    }
+                }
+                vscode.window.showErrorMessage(`Failed to apply atomic fix: ${err.message}`);
             }
         })
     );
@@ -422,13 +520,14 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
             const chunk = diffChunks[index];
+            const reviewChunks = chunksForReview(chunk);
 
-            // Nothing was written to disk for this file (the diff is a preview),
-            // so just discard this file's change from the review set.
-            await closeReviewTab(chunk);
-            await finishChunk(chunk);
+            // Cross-file fixes are one transaction. Rejecting any tab rejects
+            // every dependent edit, preventing a Rule 7-style half-state.
+            for (const reviewChunk of reviewChunks) { await closeReviewTab(reviewChunk); }
+            await finishReview(reviewChunks);
             vscode.window.showInformationMessage(
-                `DesignFix: rejected change to ${chunk.filePath.split(/[\\/]/).pop()}.`
+                `DesignFix: rejected atomic fix across ${reviewChunks.length} file(s).`
             );
         })
     );
@@ -441,18 +540,19 @@ export function activate(context: vscode.ExtensionContext) {
     // which fires on every review open/accept/reject.
     const acceptStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10000);
     acceptStatusItem.text = '$(check) Accept DesignFix Fix';
-    acceptStatusItem.tooltip = 'Apply the DesignFix suggestion shown in the diff to the file';
+    acceptStatusItem.tooltip = 'Atomically apply every file in the DesignFix suggestion shown in the diff';
     acceptStatusItem.command = 'designfix.acceptChange';
     acceptStatusItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
 
     const rejectStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 9999);
     rejectStatusItem.text = '$(close) Reject';
-    rejectStatusItem.tooltip = 'Discard the DesignFix suggestion shown in the diff';
+    rejectStatusItem.tooltip = 'Discard the complete DesignFix suggestion shown in the diff';
     rejectStatusItem.command = 'designfix.rejectChange';
 
     const updateReviewControls = () => {
         if (diffChunks.length > 0) {
-            const suffix = diffChunks.length > 1 ? ` (${diffChunks.length} pending)` : '';
+            const pendingReviews = new Set(diffChunks.map(chunk => chunk.reviewId)).size;
+            const suffix = pendingReviews > 1 ? ` (${pendingReviews} pending)` : '';
             acceptStatusItem.text = `$(check) Accept DesignFix Fix${suffix}`;
             acceptStatusItem.show();
             rejectStatusItem.show();
