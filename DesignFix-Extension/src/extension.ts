@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as WebSocket from 'ws';
 import { FileChangeManager } from './FileChangeManager'; // Ensure correct path is used
-import { buildFolderHierarchy } from './utilites'; // Removed extra semicolon and corrected typo
 //import { MessageProcessor } from './MessageProcessor';
 import { WebSocketConstants } from './WebSocketConstants';
 
@@ -97,132 +96,76 @@ export function activate(context: vscode.ExtensionContext) {
     // Workspace" - even if no folder was open when the extension activated
     // (onStartupFinished). The folder is resolved per-connection below.
     server.on('connection', (ws) => {
-            activeWebSocket = ws;
+        // A soft refresh can establish its replacement socket before the old
+        // page has finished closing. Mark the new one active first and retire
+        // the predecessor so only one browser client can drive shared state.
+        const previousWebSocket = activeWebSocket;
+        activeWebSocket = ws;
+        if (previousWebSocket && previousWebSocket !== ws &&
+            previousWebSocket.readyState !== WebSocket.CLOSED) {
+            previousWebSocket.close(1000, 'Superseded by a newer DesignFix client');
+        }
 
-            console.log('Client connected');
+        console.log('Client connected');
+        let fileChangeManager: FileChangeManager | null = null;
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 
-            (async () => { // Immediately Invoked Function Expression (IIFE) for async
-                if (vscode.workspace.workspaceFolders) {
+        if (workspaceFolder) {
+            const projectPath = workspaceFolder.uri.fsPath.replace(/\\/g, '/');
+            fileChangeManager = FileChangeManager.getInstance(projectPath, ws);
+            // Reconnects and source mutations use the same full-cycle pipeline.
+            // A reconnect starts immediately; source changes use its debounce.
+            fileChangeManager.requestFullSync({ reason: 'refresh' }, 0);
+        } else {
+            console.log('No workspace found');
+            vscode.window.showWarningMessage(
+                'DesignFix: no folder is open. Use "Open Folder" (or "Add Folder to Workspace"), ' +
+                'then reload the DesignFix client to analyze it.'
+            );
+        }
 
-                    var projectPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-                    projectPath = projectPath.replace(/\\/g, '/');
-                    const fileChangeManager = FileChangeManager.getInstance(projectPath, ws);
+        let processingQueue: Promise<void> = Promise.resolve();
+        ws.on('message', (message: string) => {
+            // Ignore a message that was already queued by the socket superseded
+            // above; all processor singletons now belong to the active client.
+            if (activeWebSocket !== ws) {
+                return;
+            }
 
-
-
-                    /*ws.send(MessageProcessor.encodeData({
-                        command: WebSocketConstants.SEND_ENTER_CHAT_MSG,
-                        data: " is connected to DesignFix",
-                    }));*/
-
-                    ws.send(JSON.stringify({
-                        command:WebSocketConstants.SEND_ENTER_CHAT_MSG,
-                        data:"Project is connected to designfix"
-                    }));
-
-                    /*ws.send(MessageProcessor.encodeData({
-                        command: WebSocketConstants.SEND_PROJECT_PATH_MSG,
-                        data: projectPath,
-                    }));*/
-
-                    ws.send(JSON.stringify({
-                        command:WebSocketConstants.SEND_PROJECT_PATH_MSG,
-                        data:projectPath
-                    }));
-
-
-                    try {
-                        const projectHierarchy = buildFolderHierarchy(projectPath); // Assuming this function is properly implemented to use async/await
-
-                        const output = {
-                            command: WebSocketConstants.SEND_PROJECT_HIERARCHY_MSG,
-                            data: projectHierarchy
-                          };
-                        
-                          // Send the project hierarchy data to the connected client
-                          ws.send(JSON.stringify(output));
-
-                        //await fileChangeManager.sendXmlFilesSequentially();
-
-                    } catch (error) {
-                        console.error('Failed to generate project hierarchy:', error);
-                    }
-                    fileChangeManager.convertAllJavaFilesToXML(projectPath).then(() => {
-                        console.log('All Java files have been converted to XML and stored.');
-                        fileChangeManager.sendXmlFilesSequentially().then(() => {
-                            /*ws.send(MessageProcessor.encodeData({
-                                command: WebSocketConstants.SEND_TAG_TABLE_MSG,
-                                data: FollowAndAuthorRulesProcessor.getInstance().getTagTableForClient()
-                            }));*/
-                            ws.send(JSON.stringify({
-                                command: WebSocketConstants.SEND_TAG_TABLE_MSG,
-                                data: FollowAndAuthorRulesProcessor.getInstance().getTagTableForClient()
-                            }));
-
-                            /*ws.send(MessageProcessor.encodeData({
-                                command: WebSocketConstants.SEND_RULE_TABLE_MSG,
-                                data: FollowAndAuthorRulesProcessor.getInstance().getRuleTableForClient()
-                            }));*/
-                            ws.send(JSON.stringify({
-                                command: WebSocketConstants.SEND_RULE_TABLE_MSG,
-                                data: FollowAndAuthorRulesProcessor.getInstance().getRuleTableForClient()
-                            }));
-
-                            /*ws.send(MessageProcessor.encodeData({
-                                command: WebSocketConstants.SEND_VERIFY_RULES_MSG,
-                                data: ""
-                            }));*/
-                            ws.send(JSON.stringify({
-                                command: WebSocketConstants.SEND_VERIFY_RULES_MSG,
-                                data: ""
-                            }));
-                        }).catch(error=>console.error("Error sending xml files : ",error));
-                        // Here you can optionally handle the stored XML data, e.g., send via WebSocket
-                    }).catch(error => console.error('Error converting Java files to XML:', error));
-
-
-
-                } else {
-                    console.log("No workspace found");
-                    vscode.window.showWarningMessage(
-                        'DesignFix: no folder is open. Use "Open Folder" (or "Add Folder to Workspace"), ' +
-                        'then reload the DesignFix client to analyze it.'
-                    );
+            // Serialize incoming work. Concurrent fix messages previously
+            // raced while mutating the shared review collection.
+            processingQueue = processingQueue.then(async () => {
+                if (activeWebSocket !== ws) {
+                    return;
                 }
-            })().catch(error => console.error('Error in WebSocket connection handler:', error));
+                const faw = FollowAndAuthorRulesProcessor.getInstance();
+                const mr = MiningRulesProcessor.getInstance();
+                const json = JSON.parse(message.toString());
 
-            let processingQueue: Promise<void> = Promise.resolve();
-            ws.on('message', (message: string) => {
-                // Serialize incoming work. Concurrent fix messages previously
-                // raced while mutating the shared review collection.
-                processingQueue = processingQueue.then(async () => {
-                    const faw = FollowAndAuthorRulesProcessor.getInstance();
-                    const mr = MiningRulesProcessor.getInstance();
-                    const json = JSON.parse(message.toString());
-
-                    if (faw.wsMessages.includes(json.command)) {
-                        await faw.processReceivedMessages(message);
-                    }
-                    else if (mr.wsMessages.includes(json.command)) {
-                        console.log("in MR");
-                        await mr.processReceivedMessages(message);
-                    }
-                }).catch((error) => {
-                    console.error("Error processing WebSocket message:", error);
-                });
-            });
-
-            ws.on('error', (error) => {
-                console.error(`WebSocket error: ${error}`);
-            });
-
-            ws.on('close', () => {
-                console.log('Client disconnected');
-                if (activeWebSocket === ws) {
-                    activeWebSocket = null;
+                if (faw.wsMessages.includes(json.command)) {
+                    await faw.processReceivedMessages(message);
                 }
+                else if (mr.wsMessages.includes(json.command)) {
+                    console.log('in MR');
+                    await mr.processReceivedMessages(message);
+                }
+            }).catch((error) => {
+                console.error('Error processing WebSocket message:', error);
             });
         });
+
+        ws.on('error', (error) => {
+            console.error(`WebSocket error: ${error}`);
+        });
+
+        ws.on('close', () => {
+            console.log('Client disconnected');
+            fileChangeManager?.disconnect(ws);
+            if (activeWebSocket === ws) {
+                activeWebSocket = null;
+            }
+        });
+    });
 
 
 

@@ -50,6 +50,7 @@ export class FollowAndAuthorRulesProcessor {
     private tagTable: Tag[];
     private currentProjectPath: string;
     private reviewSequence = 0;
+    private tableLoadGeneration = 0;
     public readonly wsMessages: string[] = [
         WebSocketConstants.RECEIVE_EDIT_FIX,
         WebSocketConstants.SEND_CONTENT_FOR_EDIT_FIX,
@@ -69,8 +70,8 @@ export class FollowAndAuthorRulesProcessor {
         this.ws = ws;
         this.tagTable = [];
         this.ruleTable = []; // Initialize as an empty array
-        this.loadTagTable();
-        this.loadRuleTable();
+        // FileChangeManager immediately calls and awaits updateProjectWs().
+        // Loading here as well would create two concurrent writers on startup.
     }
 
     public static getInstance(currentProjectPath: string = "", ws: WebSocket | null = null): FollowAndAuthorRulesProcessor {
@@ -80,53 +81,68 @@ export class FollowAndAuthorRulesProcessor {
         return this.instance;
     }
 
-    private async loadTagTable(): Promise<void> {
-        const tagTablePath = path.join(this.currentProjectPath, Constants.TAG_TABLE_JSON);
+    private async loadTagTable(projectPath: string): Promise<Tag[]> {
+        const tagTablePath = path.join(projectPath, Constants.TAG_TABLE_JSON);
         try {
             const data = await fs.readFile(tagTablePath, { encoding: 'utf8' });
-            this.tagTable = JSON.parse(data);
+            return JSON.parse(data);
         } catch (error) {
             const err = error as NodeJS.ErrnoException;
             if (err?.code === 'ENOENT') {
-                this.tagTable = [];
+                const emptyTagTable: Tag[] = [];
                 try {
-                    await fs.writeFile(tagTablePath, JSON.stringify(this.tagTable, null, 2), { encoding: 'utf8' });
+                    await fs.writeFile(tagTablePath, JSON.stringify(emptyTagTable, null, 2), { encoding: 'utf8' });
                     console.warn(`Tag table not found. Created default at ${tagTablePath}`);
                 } catch (writeError) {
                     console.error('Failed to create default tag table:', writeError);
                 }
+                return emptyTagTable;
             } else {
                 console.error('Failed to load tag table:', error);
+                throw error;
             }
         }
     }
 
-    private async loadRuleTable(): Promise<void> {
-        const ruleTablePath = path.join(this.currentProjectPath, Constants.RULE_TABLE_JSON);
+    private async loadRuleTable(projectPath: string): Promise<any[]> {
+        const ruleTablePath = path.join(projectPath, Constants.RULE_TABLE_JSON);
         try {
             const data = await fs.readFile(ruleTablePath, { encoding: 'utf8' });
-            this.ruleTable = JSON.parse(data);
+            return JSON.parse(data);
         } catch (error) {
             const err = error as NodeJS.ErrnoException;
             if (err?.code === 'ENOENT') {
-                this.ruleTable = [];
+                const emptyRuleTable: any[] = [];
                 try {
-                    await fs.writeFile(ruleTablePath, JSON.stringify(this.ruleTable, null, 2), { encoding: 'utf8' });
+                    await fs.writeFile(ruleTablePath, JSON.stringify(emptyRuleTable, null, 2), { encoding: 'utf8' });
                     console.warn(`Rule table not found. Created default at ${ruleTablePath}`);
                 } catch (writeError) {
                     console.error('Failed to create default rule table:', writeError);
                 }
+                return emptyRuleTable;
             } else {
                 console.error('Failed to load rule table:', error);
+                throw error;
             }
         }
     }
 
-    public updateProjectWs(projectPath: string, ws: WebSocket): void {
+    public async updateProjectWs(projectPath: string, ws: WebSocket): Promise<void> {
+        const generation = ++this.tableLoadGeneration;
         this.currentProjectPath = projectPath;
         this.ws = ws;
-        this.loadTagTable();
-        this.loadRuleTable();
+        // A full project snapshot must not be verified against tables that are
+        // still loading (or that belong to the preceding client/project).
+        const [tagTable, ruleTable] = await Promise.all([
+            this.loadTagTable(projectPath),
+            this.loadRuleTable(projectPath)
+        ]);
+        if (generation === this.tableLoadGeneration) {
+            // Publish the two tables together; a reconnect cannot mix one table
+            // from an obsolete load with one from the current project.
+            this.tagTable = tagTable;
+            this.ruleTable = ruleTable;
+        }
     }
 
     private nextReviewId(): string {

@@ -7,41 +7,51 @@ import {connect} from "react-redux";
 
 
 import {
+    commitRuleSnapshot,
     receiveExpressionStatementXML,
     ignoreFileChange, updateFilePath,
     updateRuleTable, updateTagTable,
-    updateWS, updateXmlFiles,
+    updateWS,
     updateProjectHierarchyData, updatedMinedRules, updateProjectPath,
     updateLoadingGif, updateFocusedElementData, updateDoiInformation, requestMineRulesForElement
 } from "../actions";
-import {checkRulesForAll, checkRulesForFile, runRulesByTypes} from "./ruleExecutor";
+import {checkRulesForAll, runRulesByTypes} from "./ruleExecutor";
 import {webSocketReceiveMessage} from "./coreConstants";
 import {processReceivedFrequentItemSets} from "../miningRulesCore/postProcessing";
 import {getDataForFocusedElement, processDoiInformation} from "../miningRulesCore/focusedElementProcessing";
 import Utilities from "./utilities";
 import {hashConst} from "../ui/uiConstants";
+import {SnapshotAccumulator} from "./snapshotAccumulator";
 
 class WebSocketManager extends Component {
 
     constructor(props) {
         super(props);
 
-        let xmlData = []; // [{filePath: "", xml: ""}]
+        let xmlData = []; // Last fully committed [{filePath: "", xml: ""}] snapshot.
         let ruleTable = [];
         let tagTable = [];
-        let ws = new WebSocket("ws://localhost:8887");
+        const stagedSnapshot = new SnapshotAccumulator();
+        const committedXml = new SnapshotAccumulator();
         let projectPath = "";
         let counter = 3;
 
-        this.props.onUpdateWS(ws);
-
-        // Start every (re)connection from a clean slate so rules are never
-        // checked against XML left over from a previous connection.
-        ws.onopen = function () { xmlData = []; };
-
+        this.ws = null;
         if (!window.WebSocket) {
             alert("FATAL: WebSocket not natively supported. This demo will not work!");
+            return;
         }
+
+        let ws = new WebSocket("ws://localhost:8887");
+        this.ws = ws;
+        this.props.onUpdateWS(ws);
+
+        // Do not clear the committed Redux state while a replacement snapshot
+        // is in flight. Only its private staging area starts over here.
+        ws.onopen = () => stagedSnapshot.reset();
+        ws.onclose = () => {
+            if (this.ws === ws) this.props.onLoadingGif(false);
+        };
 
         ws.onmessage = async (e) => {
 
@@ -56,9 +66,9 @@ class WebSocketManager extends Component {
 
 
                 case webSocketReceiveMessage.enter_chat_msg:
-                    // First message of a fresh send cycle: reset the accumulator
-                    // so the incoming full XML stream fully replaces any prior set.
-                    xmlData = [];
+                    // ENTER begins an atomic replacement transaction. Reset XML,
+                    // tags, and rules together so no value leaks across cycles.
+                    stagedSnapshot.reset();
                     this.props.onLoadingGif(true);
                     break;
 
@@ -75,49 +85,60 @@ class WebSocketManager extends Component {
 
                 case webSocketReceiveMessage.xml_files_msg:
                     // data: {filePath: "", xml: ""}
-                    xmlData.push(message.data);
+                    stagedSnapshot.upsertXml(message.data);
                     break;
 
                 case webSocketReceiveMessage.rule_table_msg:
                     // data: [ruleTable]
-                    ruleTable = Utilities.parseJson(message.data, "ruleTable", []);
-                    this.props.onUpdateXmlFiles(xmlData);
+                    stagedSnapshot.setRuleTable(Utilities.parseJson(message.data, "ruleTable", []));
                     break;
 
                 case webSocketReceiveMessage.tag_table_msg:
                     // data: [tagTable]
-                    tagTable = Utilities.parseJson(message.data, "tagTable", []);
-                    this.props.onUpdateTagTable(tagTable);
+                    stagedSnapshot.setTagTable(Utilities.parseJson(message.data, "tagTable", []));
                     break;
 
                 case webSocketReceiveMessage.verify_rules_msg:
-                    // data: ""
-                    // Guard against checking rules before the full XML set has
-                    // arrived, which would falsely flag cross-file rules.
-                    if (xmlData.length === 0) {
-                        console.warn("verify_rules received with empty xmlData; skipping to avoid false violations.");
-                        break;
+                    // VERIFY_RULES commits even an empty project. Skipping an
+                    // empty snapshot would retain stale violations and leave the
+                    // loading indicator running forever.
+                    const snapshot = stagedSnapshot.snapshot();
+                    xmlData = snapshot.xmlFiles;
+                    tagTable = snapshot.tagTable;
+                    ruleTable = checkRulesForAll(xmlData, snapshot.ruleTable);
+                    committedXml.replaceXmlFiles(xmlData);
+                    this.props.onCommitRuleSnapshot(xmlData, tagTable, ruleTable);
+
+                    // New extension versions attach the initiating reason here.
+                    // A refresh remains on the current page; a source edit keeps
+                    // the established code-changed UX without an incremental
+                    // rule evaluation.
+                    if (message.data && typeof message.data === "object" &&
+                        message.data.reason === "code_change" && message.data.filePath) {
+                        this.props.onFilePathChange(message.data.filePath);
+                        window.location.hash = `#/${hashConst.codeChanged}`;
                     }
-                    ruleTable = checkRulesForAll(xmlData, ruleTable);
-                    this.props.onUpdateRuleTable(ruleTable);
                     break;
 
                 case webSocketReceiveMessage.update_xml_file_msg:
-                    // data: {filePath: "", xml: ""}
-                    let filteredXML = xmlData.filter((d) => d.filePath === message.data["filePath"]);
-                    if (filteredXML.length === 0)
-                        xmlData.push({"filePath": message.data["filePath"], "xml": message.data["xml"]});
+                    // Compatibility with older extension builds. Stage this
+                    // delta privately; CHECK_RULES_FOR_FILE below converts it
+                    // into the same full, atomic evaluation used by refreshes.
+                    if (message.data && message.data["xml"] === "")
+                        committedXml.deleteXml(message.data["filePath"]);
                     else
-                        filteredXML[0].xml = message.data["xml"];
-                    this.props.onUpdateXmlFiles(xmlData);
+                        committedXml.upsertXml(message.data);
+                    xmlData = committedXml.snapshot().xmlFiles;
                     break;
 
                 case webSocketReceiveMessage.check_rules_for_file_msg:
-                    // data: "filePath"
+                    // Legacy protocol fallback: deliberately run every rule.
+                    // Cross-file rules cannot be evaluated consistently from a
+                    // single target file.
                     let filePath = message.data;
-                    ruleTable = checkRulesForFile(xmlData, ruleTable, filePath);
+                    ruleTable = checkRulesForAll(xmlData, ruleTable);
                     this.props.onFilePathChange(filePath);
-                    this.props.onUpdateRuleTable(ruleTable);
+                    this.props.onCommitRuleSnapshot(xmlData, tagTable, ruleTable);
                     window.location.hash = `#/${hashConst.codeChanged}`;
                     break;
 
@@ -255,6 +276,23 @@ class WebSocketManager extends Component {
         return null;
     }
 
+    componentWillUnmount() {
+        const ws = this.ws;
+        this.ws = null;
+        if (!ws) return;
+
+        // Detach callbacks first so a late close/message from this obsolete
+        // component cannot mutate the replacement connection's UI state.
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        if (ws.readyState === 0 || ws.readyState === 1)
+            ws.close(1000, "WebSocketManager unmounted");
+        this.props.onUpdateWS(null);
+        this.props.onLoadingGif(false);
+    }
+
 }
 
 
@@ -275,11 +313,11 @@ function mapDispatchToProps(dispatch) {
         onProjectPathUpdate: (projectPath) => dispatch(updateProjectPath(projectPath)),
         onUpdateRuleTable: (ruleTable) => dispatch(updateRuleTable(ruleTable)),
         onUpdateTagTable: (tagTable) => dispatch(updateTagTable(tagTable)),
+        onCommitRuleSnapshot: (xmlFiles, tagTable, ruleTable) =>
+            dispatch(commitRuleSnapshot(xmlFiles, tagTable, ruleTable)),
         onFilePathChange: (filePath) => dispatch(updateFilePath(filePath)),
         onFalsifyIgnoreFile: () => dispatch(ignoreFileChange(false)),
         onReceiveExprStmtXML: (data) => dispatch(receiveExpressionStatementXML(data)),
-        onUpdateXmlFiles: (xmlFiles) => dispatch(updateXmlFiles(xmlFiles)),
-
         onUpdateFocusedElementData: (focusedElementData) => dispatch(updateFocusedElementData(focusedElementData)),
         onUpdateDoiInformation: (doiInformation) => dispatch(updateDoiInformation(doiInformation)),
         onRequestMineRulesForElement: () => dispatch(requestMineRulesForElement()),

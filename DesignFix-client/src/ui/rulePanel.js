@@ -69,7 +69,7 @@ class RulePanel extends Component {
             filesFolders: [],
             tags: [],
 
-            filePath: none_filePath
+            filePath: props.filePath || none_filePath
         };
 
         // existing rule

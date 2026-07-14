@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom";
 import App from "./App";
-import registerServiceWorker from "./registerServiceWorker";
+import {unregister as unregisterServiceWorker} from "./registerServiceWorker";
 
 import { Provider } from "react-redux"
 
@@ -16,4 +16,7 @@ ReactDOM.render(
     </Provider>,
     document.getElementById("root")
 );
-registerServiceWorker();
+// This UI mirrors a live IDE session. Cached bundles make a normal refresh and
+// a cache-bypassing refresh run different client code, so offline caching is
+// intentionally disabled.
+unregisterServiceWorker();

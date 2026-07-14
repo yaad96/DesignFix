@@ -33,7 +33,8 @@ export class DoiProcessing{
     public updateProjectWs(projectPath: string, ws: WebSocket): void {
         this.projectPath = projectPath;
         this.ws = ws;
-        this.monitorWorkSpaceBehavior();
+        // Workspace listeners are registered once by the singleton constructor.
+        // Re-registering on every browser refresh duplicated DOI observations.
         //this.learningDRPath = path.join(this.currentProjectPath, Constants.LEARNING_DR_DIRECTORY);
 
     }

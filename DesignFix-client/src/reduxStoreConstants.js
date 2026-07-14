@@ -51,6 +51,7 @@ export const reduxStoreActions = {
     action_update_xml_files: "UPDATE_XML_FILES",
     action_update_tag_table: "UPDATE_TAG_TABLE",
     action_update_rule_table: "UPDATE_RULE_TABLE",
+    action_commit_rule_snapshot: "COMMIT_RULE_SNAPSHOT",
     action_update_rule: "UPDATE_RULE",
     action_new_rule: "NEW_RULE",
     action_new_tag: "NEW_TAG",

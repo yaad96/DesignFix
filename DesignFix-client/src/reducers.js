@@ -88,6 +88,36 @@ const reducer = (state = JSON.parse(JSON.stringify(initial_state)), action) => {
                 message: reduxStoreMessages.update_rule_table_msg
             });
 
+        case reduxStoreActions.action_commit_rule_snapshot:
+            rules = JSON.parse(JSON.stringify(action.data["ruleTable"] || []));
+            rules = rules.map(rule =>
+                Object.assign({}, rule, {
+                    rulePanelState: {
+                        ...JSON.parse(JSON.stringify(default_rulePanelState)),
+                        editMode: false,
+                        title: rule.title,
+                        description: rule.description,
+                        ruleTags: rule.tags,
+                        folderConstraint: rule.checkForFilesFoldersConstraints,
+                        filesFolders: rule.checkForFilesFolders,
+                        quantifierXPath: rule.quantifierXPathQuery[0],
+                        constraintXPath: rule.constraintXPathQuery[0],
+                        autoCompleteArray: rule.grammar && rule.grammar !== "" ? rule.grammar.split(" ").map(word => {
+                            return {id: "", text: word}
+                        }) : []
+                    }
+                })
+            );
+            return Object.assign({}, state, {
+                loadingGif: false,
+                xmlFiles: action.data["xmlFiles"] || [],
+                tagTable: action.data["tagTable"] || [],
+                ruleTable: rules,
+                // RulePanel already treats this as the signal to recalculate
+                // its display state, so retain that established message.
+                message: reduxStoreMessages.update_rule_table_msg
+            });
+
         case reduxStoreActions.action_update_rule:
             return Object.assign({}, state, {
                 message: reduxStoreMessages.update_rule_msg

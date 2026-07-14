@@ -1,406 +1,290 @@
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import * as fs from 'fs';
-import * as path from 'path';
-import { readFile } from 'fs/promises';
-import { WebSocketConstants } from './WebSocketConstants';
 import { Constants } from './Constants';
-import { buildFolderHierarchy,debounce } from './utilites';
-//import { MessageProcessor } from './MessageProcessor';
 import { FollowAndAuthorRulesProcessor } from './FollowAndAuthorRulesProcessor';
 import { MiningRulesProcessor } from './MiningRulesProcessor';
 import { DoiProcessing } from './DoiProcessing';
+import { buildFolderHierarchy } from './utilites';
+import { WebSocketConstants } from './WebSocketConstants';
+import { convertJavaToXml } from './srcmlRunner';
 
-const readFileAsync = promisify(fs.readFile);
+type XmlSnapshotEntry = Readonly<{
+    filePath: string;
+    xmlContent: string;
+}>;
 
+type FullSyncTrigger = Readonly<{
+    reason: 'refresh' | 'code_change';
+    filePath?: string;
+}>;
+
+/**
+ * Owns the one canonical project synchronization pipeline.
+ *
+ * Java filesystem events and client reconnects both invalidate any older run,
+ * build a complete local snapshot, and publish one full protocol cycle. Nothing
+ * from a run is sent until XML conversion and rule/tag loading have completed.
+ */
 export class FileChangeManager {
     private static instance: FileChangeManager;
-    private ws: WebSocket | null = null;
-    private xmlFiles: { filePath: string; xmlContent: string }[] = [];
-    private projectPath:string;
 
-    private constructor(projectPath:string,ws:WebSocket) {
+    private ws: WebSocket | null;
+    private projectPath: string;
+    private javaFileWatcher: vscode.FileSystemWatcher | null = null;
+    private fullSyncTimer: NodeJS.Timeout | null = null;
+    private syncGeneration = 0;
+    private tablesReady: Promise<void> = Promise.resolve();
+
+    private constructor(projectPath: string, ws: WebSocket) {
         this.projectPath = projectPath;
         this.ws = ws;
-        //second argument to the debounce function sets the delay timer
-        this.debouncedHandleChangeTextDocument = debounce(this.handleChangeTextDocument.bind(this), Constants.DEBOUNCER_DELAY);
-        this.watchWorkspaceChanges();
-        this.syncCollaborators();
+        this.tablesReady = this.syncCollaborators(projectPath, ws);
+        this.watchJavaFilesOnDisk();
+        this.handleActiveTextEditorChange();
     }
 
-    private syncCollaborators(): void {
-        if (!this.ws) {
-            console.warn('FileChangeManager sync skipped: WebSocket not available');
-            return;
-        }
-
-        const follow = FollowAndAuthorRulesProcessor.getInstance();
-        follow.updateProjectWs(this.projectPath, this.ws);
-
-        const mining = MiningRulesProcessor.getInstance();
-        mining.updateProjectWs(this.projectPath, this.ws);
-
-        const doi = DoiProcessing.getInstance();
-        doi.updateProjectWs(this.projectPath, this.ws);
-    }
-
-    private updateConnection(projectPath: string, ws: WebSocket): void {
-        const projectChanged = this.projectPath !== projectPath;
-        this.projectPath = projectPath;
-        this.ws = ws;
-        this.syncCollaborators();
-        // Re-scope the on-disk watcher if the project path changed on reconnect.
-        if (projectChanged) {
-            this.watchJavaFilesOnDisk();
-        }
-    }
-
-    /*public void checkChangedProject(){
-
-    }*/
-
-    public static getInstance(projectPath:string,ws:WebSocket): FileChangeManager {
+    public static getInstance(projectPath: string, ws: WebSocket): FileChangeManager {
         if (!FileChangeManager.instance) {
-            FileChangeManager.instance = new FileChangeManager(projectPath,ws);
+            FileChangeManager.instance = new FileChangeManager(projectPath, ws);
         } else {
             FileChangeManager.instance.updateConnection(projectPath, ws);
         }
         return FileChangeManager.instance;
     }
 
-    private debouncedHandleChangeTextDocument: (event: vscode.TextDocumentChangeEvent) => void;
+    private updateConnection(projectPath: string, ws: WebSocket): void {
+        const projectChanged = this.projectPath !== projectPath;
 
-    // Filesystem watcher so on-disk edits made outside this editor
-    // (other VS Code windows, git, formatters, external tools) are reflected instantly.
-    private javaFileWatcher: vscode.FileSystemWatcher | null = null;
-    private diskChangeTimers: Map<string, NodeJS.Timeout> = new Map();
+        // Invalidate before replacing either mutable value. A scan that belongs
+        // to the previous client/project may keep converting, but cannot send.
+        this.invalidateCurrentSync();
+        this.projectPath = projectPath;
+        this.ws = ws;
+        this.tablesReady = this.syncCollaborators(projectPath, ws);
 
-
-    private watchWorkspaceChanges() {
-
-        this.handleActiveTextEditorChange();
-
-        vscode.workspace.onDidChangeTextDocument(this.debouncedHandleChangeTextDocument);
-        vscode.workspace.onDidCreateFiles(this.handleCreateFile.bind(this));
-        vscode.workspace.onDidDeleteFiles(this.handleDeleteFile.bind(this));
-        vscode.workspace.onDidRenameFiles(this.handleRenameFile.bind(this));
-
-        this.watchJavaFilesOnDisk();
-        // You can add more event listeners as needed
+        if (projectChanged) {
+            this.watchJavaFilesOnDisk();
+        }
     }
 
-    // Watches every *.java file on disk under the project. Unlike the
-    // vscode.workspace.onDidChange*/onDidCreate*/onDidDelete* events (which only
-    // fire for changes performed inside this editor), a FileSystemWatcher fires
-    // for changes from ANY source, giving instant reflection in the web app.
-    private watchJavaFilesOnDisk() {
-        // Dispose any previous watcher (e.g. on reconnect with a new project path).
-        if (this.javaFileWatcher) {
-            this.javaFileWatcher.dispose();
-            this.javaFileWatcher = null;
+    /** Cancel work only when the socket being closed is still the current one. */
+    public disconnect(ws: WebSocket): void {
+        if (this.ws !== ws) {
+            return;
         }
-        if (!this.projectPath) { return; }
+        this.invalidateCurrentSync();
+        this.ws = null;
+    }
+
+    private syncCollaborators(projectPath: string, ws: WebSocket): Promise<void> {
+        const follow = FollowAndAuthorRulesProcessor.getInstance(projectPath, ws);
+        const tableLoad = follow.updateProjectWs(projectPath, ws);
+        // Keep the original rejecting promise for runFullSync while ensuring a
+        // very fast disconnect cannot leave its rejection temporarily unhandled.
+        void tableLoad.catch(() => undefined);
+
+        MiningRulesProcessor.getInstance(projectPath, ws).updateProjectWs(projectPath, ws);
+        DoiProcessing.getInstance(projectPath, ws).updateProjectWs(projectPath, ws);
+
+        return tableLoad;
+    }
+
+    /**
+     * Request a complete refresh. Every request increments the generation
+     * immediately, so even a request waiting in the debounce window supersedes
+     * a scan or send already in progress.
+     */
+    public requestFullSync(trigger: FullSyncTrigger, delayMs = Constants.DEBOUNCER_DELAY): void {
+        const generation = this.invalidateCurrentSync();
+        const socket = this.ws;
+        const projectPath = this.projectPath;
+        const tablesReady = this.tablesReady;
+        const capturedTrigger = Object.freeze({ ...trigger });
+
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            return;
+        }
+
+        this.fullSyncTimer = setTimeout(() => {
+            this.fullSyncTimer = null;
+            this.runFullSync(generation, projectPath, socket, tablesReady, capturedTrigger).catch(error => {
+                if (this.isCurrent(generation, projectPath, socket)) {
+                    console.error(`DesignFix full sync failed (${capturedTrigger.reason}):`, error);
+                }
+            });
+        }, delayMs);
+    }
+
+    private invalidateCurrentSync(): number {
+        this.syncGeneration += 1;
+        if (this.fullSyncTimer) {
+            clearTimeout(this.fullSyncTimer);
+            this.fullSyncTimer = null;
+        }
+        return this.syncGeneration;
+    }
+
+    private isCurrent(generation: number, projectPath: string, socket: WebSocket): boolean {
+        return generation === this.syncGeneration &&
+            projectPath === this.projectPath &&
+            socket === this.ws &&
+            socket.readyState === WebSocket.OPEN;
+    }
+
+    private async runFullSync(
+        generation: number,
+        projectPath: string,
+        socket: WebSocket,
+        tablesReady: Promise<void>,
+        trigger: FullSyncTrigger
+    ): Promise<void> {
+        // Both operations finish before ENTER. If conversion fails, the client
+        // keeps its previous committed result instead of receiving a partial set.
+        const [xmlSnapshot] = await Promise.all([
+            this.buildXmlSnapshot(projectPath),
+            tablesReady
+        ]);
+
+        if (!this.isCurrent(generation, projectPath, socket)) {
+            return;
+        }
+
+        const follow = FollowAndAuthorRulesProcessor.getInstance();
+        const tagTable = follow.getTagTableForClient();
+        const ruleTable = follow.getRuleTableForClient();
+        const projectHierarchy = buildFolderHierarchy(projectPath);
+
+        const protocolMessages = [
+            {
+                command: WebSocketConstants.SEND_ENTER_CHAT_MSG,
+                data: 'Project is connected to designfix'
+            },
+            {
+                command: WebSocketConstants.SEND_PROJECT_PATH_MSG,
+                data: projectPath
+            },
+            {
+                command: WebSocketConstants.SEND_PROJECT_HIERARCHY_MSG,
+                data: projectHierarchy
+            },
+            ...xmlSnapshot.map(({ filePath, xmlContent }) => ({
+                command: WebSocketConstants.SEND_XML_FILES_MSG,
+                data: {
+                    filePath: filePath.replace(/\\/g, '/'),
+                    xml: xmlContent
+                }
+            })),
+            {
+                command: WebSocketConstants.SEND_TAG_TABLE_MSG,
+                data: tagTable
+            },
+            {
+                command: WebSocketConstants.SEND_RULE_TABLE_MSG,
+                data: ruleTable
+            },
+            {
+                command: WebSocketConstants.SEND_VERIFY_RULES_MSG,
+                data: trigger.filePath
+                    ? { reason: trigger.reason, filePath: trigger.filePath.replace(/\\/g, '/') }
+                    : { reason: trigger.reason }
+            }
+        ];
+
+        // Enqueue the complete transaction in one JavaScript turn. `ws` keeps
+        // per-socket send order; without an await here, a new filesystem event
+        // cannot invalidate the generation between ENTER and VERIFY and strand
+        // the client with an uncommitted partial staging set.
+        for (const message of protocolMessages) {
+            if (!this.isCurrent(generation, projectPath, socket)) {
+                return;
+            }
+            socket.send(JSON.stringify(message), error => {
+                if (error) {
+                    console.error('DesignFix full-sync WebSocket send failed:', error);
+                }
+            });
+        }
+
+        console.log(`DesignFix full sync complete (${trigger.reason}): ${xmlSnapshot.length} Java file(s).`);
+    }
+
+    /**
+     * One watcher is sufficient for saves, creates, deletes, and both halves of
+     * a rename, including changes made by tools outside this VS Code window.
+     */
+    private watchJavaFilesOnDisk(): void {
+        this.javaFileWatcher?.dispose();
+        this.javaFileWatcher = null;
+
+        if (!this.projectPath) {
+            return;
+        }
 
         const pattern = new vscode.RelativePattern(this.projectPath, '**/*.java');
         this.javaFileWatcher = vscode.workspace.createFileSystemWatcher(pattern);
-
-        this.javaFileWatcher.onDidChange(uri => this.debouncedHandleDiskChange(uri.fsPath));
-        this.javaFileWatcher.onDidCreate(uri => this.debouncedHandleDiskChange(uri.fsPath, true));
-        this.javaFileWatcher.onDidDelete(uri => this.handleDiskDelete(uri.fsPath));
+        this.javaFileWatcher.onDidChange(uri => this.handleJavaFileMutation(uri.fsPath, 'save/change'));
+        this.javaFileWatcher.onDidCreate(uri => this.handleJavaFileMutation(uri.fsPath, 'create/rename'));
+        this.javaFileWatcher.onDidDelete(uri => this.handleJavaFileMutation(uri.fsPath, 'delete/rename'));
     }
 
-    // The extension itself writes temporary *.java files into the project during
-    // rule authoring / expression evaluation (e.g. Constants.TEMP_JAVA_FILE).
-    // These must be ignored by the disk watcher, otherwise it would push bogus
-    // XML to the client and error when the temp file is deleted mid-debounce.
+    private handleJavaFileMutation(javaFilePath: string, kind: string): void {
+        if (this.isIgnoredJavaFile(javaFilePath)) {
+            return;
+        }
+        console.log(`DesignFix scheduling full sync (${kind}): ${javaFilePath}`);
+        this.requestFullSync({ reason: 'code_change', filePath: javaFilePath });
+    }
+
     private isIgnoredJavaFile(javaFilePath: string): boolean {
         const base = javaFilePath.replace(/\\/g, '/').split('/').pop() || '';
         return base === Constants.TEMP_JAVA_FILE || base === Constants.TEMP_JAVA_FILE_TESTING;
     }
 
-    // Debounce per-file so a burst of writes triggers a single reconvert.
-    private debouncedHandleDiskChange(javaFilePath: string, isCreate = false) {
-        if (this.isIgnoredJavaFile(javaFilePath)) { return; }
-        const existing = this.diskChangeTimers.get(javaFilePath);
-        if (existing) { clearTimeout(existing); }
-        const timer = setTimeout(() => {
-            this.diskChangeTimers.delete(javaFilePath);
-            this.reconvertAndPushFile(javaFilePath, isCreate).catch(err =>
-                console.error(`Error handling disk change for ${javaFilePath}:`, err));
-        }, Constants.DEBOUNCER_DELAY);
-        this.diskChangeTimers.set(javaFilePath, timer);
-    }
+    private async buildXmlSnapshot(projectPath: string): Promise<ReadonlyArray<XmlSnapshotEntry>> {
+        const javaUris = await vscode.workspace.findFiles(
+            new vscode.RelativePattern(projectPath, '**/*.java')
+        );
+        const javaFiles = javaUris
+            .map(uri => uri.fsPath)
+            .filter(filePath => !this.isIgnoredJavaFile(filePath))
+            .sort((left, right) =>
+                left.replace(/\\/g, '/').localeCompare(right.replace(/\\/g, '/'))
+            );
 
-    // Reconvert a single changed/created file and push the updated XML + a
-    // targeted rule re-check to the client (fast path, no full reconvert).
-    private async reconvertAndPushFile(javaFilePath: string, isCreate: boolean) {
-        if (!this.ws) { return; }
-        const xmlContent = await this.convertToXML(javaFilePath);
-        const existingIndex = this.xmlFiles.findIndex(f => f.filePath === javaFilePath);
-        if (existingIndex !== -1) {
-            this.xmlFiles[existingIndex].xmlContent = xmlContent;
-        } else {
-            this.xmlFiles.push({ filePath: javaFilePath, xmlContent });
+        const snapshot: XmlSnapshotEntry[] = [];
+        for (const filePath of javaFiles) {
+            // A single failure rejects the whole local build. No protocol phase
+            // has started yet, so the last client snapshot remains authoritative.
+            const xmlContent = await this.convertToXML(filePath);
+            snapshot.push(Object.freeze({ filePath, xmlContent }));
         }
-        this.sendUpdatedXMLFile(javaFilePath.replace(/\\/g, '/'), xmlContent, WebSocketConstants.SEND_UPDATE_XML_FILE_MSG);
-        if (isCreate) {
-            this.updateProjectHierarchy();
-        }
-    }
-
-    private handleDiskDelete(javaFilePath: string) {
-        if (this.isIgnoredJavaFile(javaFilePath)) { return; }
-        const existing = this.diskChangeTimers.get(javaFilePath);
-        if (existing) { clearTimeout(existing); this.diskChangeTimers.delete(javaFilePath); }
-        const index = this.xmlFiles.findIndex(x => x.filePath === javaFilePath);
-        if (index !== -1) {
-            this.xmlFiles.splice(index, 1);
-        }
-        this.sendUpdatedXMLFile(javaFilePath.replace(/\\/g, '/'), "", WebSocketConstants.SEND_UPDATE_XML_FILE_MSG);
-        this.updateProjectHierarchy();
-    }
-
-    private sendUpdatedXMLFile(javaFilePath:string,xmlContent:String,command:string){
-        if (this.ws) {
-            const message = JSON.stringify({
-                command: command,
-                data: { filePath: javaFilePath.replace(/\\/g, '/'), xml: xmlContent }
-            });
-            this.ws.send(message, error => {
-                if (error) {
-                    console.error(`Error sending XML for file ${javaFilePath}:`, error);
-                }
-                //else { console.log(`Successfully sent XML for file ${javaFilePath}`); }
-            });
-
-            const check_rule_messaage = JSON.stringify({
-                command:WebSocketConstants.SEND_CHECK_RULES_FOR_FILE_MSG,
-                data:javaFilePath.replace(/\\/g, '/')
-
-            });
-            this.ws.send(check_rule_messaage, error => {
-                if (error) {
-                    console.error(`Error sending check_rule_message for file ${javaFilePath}:`, error);
-                }
-                //else { console.log(`Successfully sent check_rule_message for file ${javaFilePath}`); }
-            });
-
-            // sendMessage(MessageProcessor.encodeData(new Object[]{WebSocketConstants.SEND_CHECK_RULES_FOR_FILE_MSG,
-            //filePath}).toString());  etao korte hobe
-        }
-    }
-
-    private async updateProjectHierarchy() {
-        const projectHierarchy = buildFolderHierarchy(this.projectPath); // Assuming this function is properly implemented to use async/await
-
-                        const output = {
-                            command: WebSocketConstants.SEND_PROJECT_HIERARCHY_MSG,
-                            data: projectHierarchy
-                          };
-                        
-                          // Send the project hierarchy data to the connected client
-                          if (this.ws?.readyState === WebSocket.OPEN) {
-                            this.ws.send(JSON.stringify(output));
-                          } else {
-                            console.warn('Skipping send: WebSocket not open');
-                          }
-                          
-    }
-
-    private handleActiveTextEditorChange() {
-        vscode.window.onDidChangeActiveTextEditor(editor => {
-            if (editor) {
-                const document = editor.document;
-                if (document.languageId === 'java') { // Adjust the condition based on your requirements
-                    const javaFilePath = document.uri.fsPath;
-                    
-                    if(this.ws){
-                        this.ws.send(JSON.stringify({
-                            command:WebSocketConstants.SEND_FILE_CHANGE_IN_IDE_MSG,
-                            data: javaFilePath.replace(/\\/g, '/')
-                        }));
-                    }
-
-                }
-            }
-        });
-    }
-    
-    
-
-    private async handleCreateFile(event: vscode.FileCreateEvent) {
-        for (const file of event.files) {
-            if (file.path.endsWith('.java')) {
-                const javaFilePath = file.fsPath;
-    
-                try {
-                    const xmlContent = await this.convertToXML(javaFilePath); // Adjusted call
-                    this.xmlFiles.push({ filePath: javaFilePath, xmlContent });
-    
-                    this.sendUpdatedXMLFile(javaFilePath.replace(/\\/g, '/'), xmlContent, WebSocketConstants.SEND_UPDATE_XML_FILE_MSG);
-                    
-                    // Generate and send new project hierarchy
-                    this.updateProjectHierarchy();
-                } catch (error) {
-                    console.error(`Error processing newly created file ${javaFilePath}:`, error);
-                }
-            }
-        }
-    }
-    
-
-
-    private async handleDeleteFile(event: vscode.FileDeleteEvent) {
-        for (const file of event.files) {
-            if (file.path.endsWith('.java')) {
-                const javaFilePath = file.fsPath;
-                const index = this.xmlFiles.findIndex(x => x.filePath === javaFilePath);
-                if (index !== -1) {
-                    this.xmlFiles.splice(index, 1);
-    
-                    this.sendUpdatedXMLFile(javaFilePath.replace(/\\/g, '/'), "", WebSocketConstants.SEND_UPDATE_XML_FILE_MSG);
-    
-                    // Generate and send new project hierarchy
-                    this.updateProjectHierarchy();
-                }
-            }
-        }
-    }
-    
-    
-
-
-    private async handleRenameFile(event: vscode.FileRenameEvent) {
-        for (const { oldUri, newUri } of event.files) {
-            if (newUri.path.endsWith('.java')) {
-                const newFilePath = newUri.fsPath;
-                const oldIndex = this.xmlFiles.findIndex(x => x.filePath === oldUri.fsPath);
-    
-                try {
-                    const xmlContent = await this.convertToXML(newFilePath);
-    
-                    if (oldIndex !== -1) {
-                        this.xmlFiles.splice(oldIndex, 1); // Remove old entry
-                    }
-                    this.xmlFiles.push({ filePath: newFilePath, xmlContent });
-    
-                    this.sendUpdatedXMLFile(newFilePath.replace(/\\/g, '/'), xmlContent, WebSocketConstants.SEND_UPDATE_XML_FILE_MSG);
-    
-                    // Generate and send new project hierarchy
-                    this.updateProjectHierarchy();
-                } catch (error) {
-                    console.error(`Error processing renamed file ${newFilePath}:`, error);
-                }
-            }
-        }
-    }
-    
-
-
-
-
-    private async handleChangeTextDocument(event: vscode.TextDocumentChangeEvent) {
-        if (this.ws && event.document.languageId === 'java') {
-            const javaFilePath = event.document.uri.fsPath;
-    
-            try {
-                const xmlContent = await this.convertToXML(javaFilePath);
-    
-                const existingFileIndex = this.xmlFiles.findIndex(file => file.filePath === javaFilePath);
-                if (existingFileIndex !== -1) {
-                    this.xmlFiles[existingFileIndex].xmlContent = xmlContent;
-                } else {
-                    this.xmlFiles.push({ filePath: javaFilePath, xmlContent });
-                }
-    
-            this.sendUpdatedXMLFile(javaFilePath.replace(/\\/g, '/'), xmlContent, WebSocketConstants.SEND_UPDATE_XML_FILE_MSG);
-    
-            } catch (error) {
-                console.error(`Error processing ${javaFilePath}:`, error);
-            }
-        }
-    }
-    
-
-
-    public async convertAllJavaFilesToXML(projectPath: string) {
-        // Build into a local array and swap it in atomically at the end. This
-        // prevents a concurrent reader (e.g. a racing client reconnect calling
-        // sendXmlFilesSequentially) from ever observing a half-populated set,
-        // which would make the client check rules against partial data.
-        const collected: { filePath: string; xmlContent: string }[] = [];
-        const javaFiles = await vscode.workspace.findFiles(new vscode.RelativePattern(projectPath, '**/*.java'));
-        for (const file of javaFiles) {
-            const inputFilePath = file.fsPath;
-            if (this.isIgnoredJavaFile(inputFilePath)) { continue; } // skip our own temp files
-            try {
-                // Directly receive XML content from the conversion function
-                const xmlContent = await this.convertToXML(inputFilePath);
-                collected.push({ filePath: inputFilePath, xmlContent });
-            } catch (error) {
-                console.error(`Error converting ${inputFilePath} to XML:`, error);
-            }
-        }
-        this.xmlFiles = collected;
-        console.log("final number of xmlfiles: ",this.xmlFiles.length);
+        return Object.freeze(snapshot);
     }
 
     private convertToXML(inputFilePath: string): Promise<string> {
-        return new Promise<string>((resolve, reject) => {
-            // pick the right srcml executable based on platform
-            const bin = process.platform === 'win32'
-                ? Constants.SRCML_PATH_WINDOWS
-                : process.platform === 'darwin'
-                    ? Constants.SRCML_PATH_MAC
-                    : Constants.SRCML_PATH_LINUX;
-            // Adjust the command to output XML to stdout (quote both binary and path)
-            const command = `"${bin}" "${inputFilePath}"`;
-            exec(command, (error, stdout, stderr) => {
+        return convertJavaToXml(inputFilePath);
+    }
+
+    /** Keep IDE active-editor navigation independent from project re-analysis. */
+    private handleActiveTextEditorChange(): void {
+        vscode.window.onDidChangeActiveTextEditor(editor => {
+            if (!editor || editor.document.languageId !== 'java') {
+                return;
+            }
+
+            const socket = this.ws;
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                return;
+            }
+
+            socket.send(JSON.stringify({
+                command: WebSocketConstants.SEND_FILE_CHANGE_IN_IDE_MSG,
+                data: editor.document.uri.fsPath.replace(/\\/g, '/')
+            }), error => {
                 if (error) {
-                    console.error(`Error executing srcML for file ${inputFilePath}:`, error);
-                    reject(error);
-                } else if (stderr) {
-                    console.error(`Error in srcML output for file ${inputFilePath}:`, stderr);
-                    reject(new Error(stderr));
-                } else {
-                    //console.log(`Converted to XML: ${inputFilePath}`);
-                    resolve(stdout); // stdout contains the XML content
+                    console.error('Failed to send active Java file:', error);
                 }
             });
         });
     }
-
-
-
-    public async sendXmlFilesSequentially(): Promise<void> {
-        if (!this.ws) {
-            console.error('WebSocket is not set or connected.');
-            return;
-        }
-        console.log("number of xmlfiles: ", this.xmlFiles.length);
-
-        for (const { filePath, xmlContent } of this.xmlFiles) {
-            const formattedFilePath = filePath.replace(/\\/g, '/');
-            const message = JSON.stringify({
-                command: WebSocketConstants.SEND_XML_FILES_MSG,
-                data: { filePath:formattedFilePath, xml: xmlContent }
-            });
-
-            // Wait for the send operation to complete before proceeding to the next file
-            await new Promise<void>((resolve, reject) => {
-                this.ws!.send(message, (error) => {
-                    if (error) {
-                        console.error(`Error sending XML for file ${filePath}:`, error);
-                        reject(error); // Stop sending if an error occurs
-                    } else {
-                        //console.log(`Sent XML for file ${filePath}`);
-                        resolve();
-                    }
-                });
-            });
-        }
-    }
-
 }

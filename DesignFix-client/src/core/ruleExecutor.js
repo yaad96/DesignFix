@@ -26,9 +26,14 @@ import {fileFolderConstraints, processFileFolder, queryType, relatives, ruleProp
  */
 export const checkRulesForAll = (xmlFiles, ruleTable) => {
     for (let i = 0; i < ruleTable.length; i++) {
+        // A full check replaces the previous generation. BETWEEN and MIXED
+        // runners append results, so retaining this array creates duplicates on
+        // every soft refresh or source change.
+        ruleTable[i].xPathQueryResult = [];
         if(!isValidXPathQueries(ruleTable[i])) {
-            ruleTable[i].xPathQueryResult = [];
-            ruleTable[i].description += " <XPATH query is not valid. Check out the XPATH in ruleJson.txt>";
+            const invalidXPathMessage = " <XPATH query is not valid. Check out the XPATH in ruleJson.txt>";
+            if (!ruleTable[i].description.endsWith(invalidXPathMessage))
+                ruleTable[i].description += invalidXPathMessage;
         }
         else
             ruleTable[i] = runRulesByTypes(xmlFiles, ruleTable[i]);
@@ -144,7 +149,7 @@ export const runRulesByTypes = (xmlFiles, ruleI) => {
             break;
 
         case fileFolderConstraints.exclude:
-            xmlFilesToVerify = xmlFilesToVerify.filter((d) => {
+            xmlFilesToVerify = xmlFiles.filter((d) => {
                 for (let j = 0; j < checkForFilesFolders.length; j++)
                     // Warning
                     // This can lead to error if fileName is saved as X.java 

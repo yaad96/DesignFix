@@ -192,7 +192,56 @@ Reload <http://localhost:9010> after the reset and wait for preprocessing to fin
 
 ---
 
-## 7. Quick start (TL;DR)
+## 7. Running the Cline baseline
+
+1. **Generate and reserve a run.** Replace each `nn` with the intended rule ID
+   or positive run number, then run:
+
+   ```powershell
+   cd "f:\DesignFix-Extension + Client"
+   node scripts/make_cline_prompt.js `
+     --rule=<nn> `
+     --project-root="f:/CrowdCoding-ActiveDocumentation" `
+     --violation-file="pathe/to/the/violating/file" `
+     --run=<nn> `
+     --model="gpt-4o" `
+     --clipboard
+   ```
+
+2. **Run Cline.** Open only the target Java project in VS Code, start a fresh
+   Cline task, paste the generated prompt, and let Cline finish. Use the same
+   approvals for every run and do not provide repair hints.
+
+3. **Collect the completed task before restoring the project:**
+
+   ```powershell
+   node scripts/collect_cline_task.js --rule=<nn> --run=<nn>
+   ```
+
+4. **Restore the target project to the original violation state from the
+   backup:**
+
+   ```powershell
+   robocopy "F:\OG_Backup_CrowdCode\src" "F:\CrowdCoding-ActiveDocumentation\src" /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:2
+   $resetExit = $LASTEXITCODE
+   if ($resetExit -ge 8) {
+       throw "CrowdCoding source reset failed with Robocopy exit code $resetExit"
+   }
+   ```
+
+5. **Compute process metrics after collecting the runs:**
+
+   ```powershell
+   node scripts/analyze_cline_run.js --all
+   ```
+
+
+   Always collect the run before restoring. Robocopy exit codes `0` through `7`
+   indicate success; `8` or higher indicates failure. Because `/MIR` deletes
+   destination files that are absent from the backup, verify both paths before
+   running the command.
+
+## 8. Quick start (TL;DR)
 
 ```powershell
 # 1. Install

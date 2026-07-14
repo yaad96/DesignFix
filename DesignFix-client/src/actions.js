@@ -70,6 +70,18 @@ export const updateRuleTable = (newRuleTable) => {
     };
 };
 
+/**
+ * Publish a completely verified snapshot in one reducer transition. Keeping
+ * XML, tags, and evaluated rules together prevents the UI from rendering a
+ * mixture of two refresh generations.
+ */
+export const commitRuleSnapshot = (xmlFiles, tagTable, ruleTable) => {
+    return {
+        type: reduxStoreActions.action_commit_rule_snapshot,
+        data: {xmlFiles, tagTable, ruleTable}
+    };
+};
+
 
 export const updateRule = () => {
     return {type: reduxStoreActions.action_update_rule};

@@ -26,6 +26,7 @@ coverage/
 # Experiment + agentic-comparison data (large / machine-specific)
 /data/
 /cline_data/
+/old_designFix_data/
 
 # Local scratch / model outputs (keep if you decide to version them; ignored by default)
 # /scripts/tmp/
