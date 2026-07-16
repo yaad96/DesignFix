@@ -153,7 +153,7 @@ ${report}
 
 Repair the reported violation in the repository.
 
-Inspect the workspace and use repository search, file-reading and file-editing tools, and terminal commands as needed. Determine the appropriate repair location and implementation from the project itself. Do not assume that the displayed snippet contains all information needed for the repair.
+Inspect the workspace and use repository search, file-reading and file-editing tools, and terminal commands as needed. Determine the appropriate repair location and implementation from the project itself. 
 
 Make the smallest correct change that resolves the reported violation while preserving unrelated behavior and existing project conventions. Run the available design-rule checker, build, and relevant tests before finishing when those commands are available.
 
