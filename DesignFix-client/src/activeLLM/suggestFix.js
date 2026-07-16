@@ -245,7 +245,6 @@ ${file.content}
             // Full log record for the DesignFix agentic-comparison dataset. Written
             // to disk by the extension when the user clicks "Accept Fix".
             llmModifiedFileContent.data.log = {
-                createdAt: new Date().toISOString(),
                 model: modelLabel,
                 violationFilePath,
                 exampleFilePath,

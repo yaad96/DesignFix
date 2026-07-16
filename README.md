@@ -174,21 +174,26 @@ The command rebuilds `war\WEB-INF\classes` and writes the complete compiler outp
 
 ### 6d. Restore the seeded violations
 
-After recording the result, restore the working source tree from the backup:
+After recording the result, restore the working source tree **and reset the runner** from the backup:
+
+`robocopy` mirrors one source into one destination per call, so the two restores are wrapped in a single loop that shares the same options and one exit-code check:
 
 ```powershell
-robocopy "F:\OG_Backup_CrowdCode\src" "F:\CrowdCoding-ActiveDocumentation\src" /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:2
-$resetExit = $LASTEXITCODE
-if ($resetExit -ge 8) {
-    throw "CrowdCoding source reset failed with Robocopy exit code $resetExit"
+# Restore both the study source (seeded violations) and the runner from the backup.
+# /XD cache keeps the runner's ~135 MB downloaded SDK archive; src has no 'cache' folder, so it is a no-op there.
+foreach ($p in @("src", "CrowdCoding-Runner")) {
+    robocopy "F:\OG_Backup_CrowdCode\$p" "F:\CrowdCoding-ActiveDocumentation\$p" /MIR /XD cache /COPY:DAT /DCOPY:DAT /R:2 /W:2
+    if ($LASTEXITCODE -ge 8) {
+        throw "CrowdCoding reset of '$p' failed with Robocopy exit code $LASTEXITCODE"
+    }
 }
 ```
 
-`/MIR` makes the working `src` directory match the backup exactly, including removing source files created by a suggested fix. It does not alter the backup or reset runner caches, generated classes, or logs outside `src`. Robocopy exit codes `0` through `7` indicate success; `8` or higher indicates failure.
+`/MIR` makes each destination match the backup exactly, removing files that a suggested fix or a compile created. The `src` pass brings back the seeded violations; the `CrowdCoding-Runner` pass clears generated runner state (`tools\compile.log`, `tools\sources.txt`, and any stray build output). `/XD cache` preserves the runner's `tools\cache` folder, the ~135 MB downloaded GAE SDK/ECJ archive, so `setup.cmd` does not re-download it; `src` has no `cache` folder, so the exclusion is a no-op there. Neither pass touches the backup itself, and the recompiled `war\WEB-INF\classes` tree is refreshed on the next compile rather than by this restore. Robocopy exit codes `0` through `7` indicate success; `8` or higher indicates failure.
 
 Reload <http://localhost:9010> after the reset and wait for preprocessing to finish. The seeded violations should be visible again.
 
-> **Warning:** `/MIR` deletes files from the destination `src` directory when they do not exist in the backup. Verify both paths before running the command.
+> **Warning:** `/MIR` deletes files from each destination (`src` and `CrowdCoding-Runner`) that are absent from the backup. Verify all paths before running. The `/XD cache` exclusion deliberately keeps the runner's `tools\cache` download; drop it only when you want to force a fresh SDK download.
 
 ---
 
@@ -215,21 +220,33 @@ Reload <http://localhost:9010> after the reset and wait for preprocessing to fin
 3. **Collect the completed task before restoring the project:**
 
    ```powershell
+   cd "f:\DesignFix-Extension + Client"
    node scripts/collect_cline_task.js --rule=<nn> --run=<nn>
    ```
+4. Run the strict compilation gate after accepting a fix:
 
-4. **Restore the target project to the original violation state from the
-   backup:**
+```powershell
+Set-Location "F:\CrowdCoding-ActiveDocumentation\CrowdCoding-Runner"
+.\run.cmd compile-strict
+$compileExit = $LASTEXITCODE
+Write-Host "Exit code: $compileExit"
+```
+
+5. **Restore the target project (source and runner) to the original
+   violation state from the backup:**
 
    ```powershell
-   robocopy "F:\OG_Backup_CrowdCode\src" "F:\CrowdCoding-ActiveDocumentation\src" /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:2
-   $resetExit = $LASTEXITCODE
-   if ($resetExit -ge 8) {
-       throw "CrowdCoding source reset failed with Robocopy exit code $resetExit"
+   # Restore both the study source (seeded violations) and the runner from the backup.
+   # /XD cache keeps the runner's downloaded SDK archive; src has no 'cache' folder.
+   foreach ($p in @("src", "CrowdCoding-Runner")) {
+       robocopy "F:\OG_Backup_CrowdCode\$p" "F:\CrowdCoding-ActiveDocumentation\$p" /MIR /XD cache /COPY:DAT /DCOPY:DAT /R:2 /W:2
+       if ($LASTEXITCODE -ge 8) {
+           throw "CrowdCoding reset of '$p' failed with Robocopy exit code $LASTEXITCODE"
+       }
    }
    ```
 
-5. **Compute process metrics after collecting the runs:**
+6. **Compute process metrics after collecting the runs:**
 
    ```powershell
    node scripts/analyze_cline_run.js --all
@@ -238,7 +255,7 @@ Reload <http://localhost:9010> after the reset and wait for preprocessing to fin
 
    Always collect the run before restoring. Robocopy exit codes `0` through `7`
    indicate success; `8` or higher indicates failure. Because `/MIR` deletes
-   destination files that are absent from the backup, verify both paths before
+   destination files that are absent from the backup, verify all paths before
    running the command.
 
 ## 8. Quick start (TL;DR)

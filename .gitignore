@@ -27,6 +27,7 @@ coverage/
 /data/
 /cline_data/
 /old_designFix_data/
+/user_study_data/
 
 # Local scratch / model outputs (keep if you decide to version them; ignored by default)
 # /scripts/tmp/

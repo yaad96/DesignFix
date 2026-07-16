@@ -165,11 +165,9 @@ When finished, briefly summarize:
 3. the validation commands run and their results.`;
 
 const snapshotEnabled = parseBoolean(flags.snapshot, "--snapshot", true);
-const createdAt = new Date().toISOString();
 const metadata = {
     schemaVersion: 1,
     status: "pending",
-    createdAt,
     ruleId: String(rule.index),
     ruleTitle: rule.title || "",
     runNumber,

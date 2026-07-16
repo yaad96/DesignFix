@@ -922,7 +922,6 @@ export class FollowAndAuthorRulesProcessor {
         const meta = {
             ruleId: log.ruleId,
             ruleTitle: log.ruleTitle ?? '',
-            createdAt: log.createdAt ?? new Date().toISOString(),
             model: log.model ?? '',
             violationFilePath: log.violationFilePath ?? '',
             exampleFilePath: log.exampleFilePath ?? '',
