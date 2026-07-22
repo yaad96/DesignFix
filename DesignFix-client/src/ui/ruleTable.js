@@ -58,7 +58,7 @@ function mapStateToProps(state) {
 
     let props = {
         newRule: state.rulePadState.isEditMode,
-        indicesOfRulesToDisplay: state.ruleTable.map(d => d.index),
+        indicesOfRulesToDisplay: state.ruleTable.map(d => d.index).sort((a, b) => Number(a) - Number(b)),
         hash0: state.currentHash[0],
         // Increments on every navigation; used as part of the panel key so each
         // visit to a view mounts fresh panels (no residual fix diffs / open
