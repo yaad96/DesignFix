@@ -123,7 +123,7 @@ class RulePanel extends Component {
                             onClick={() => this.changeEditMode()}
                             className={"react-icons"} />
                     </div>
-                    <ControlLabel>{this.props.hash0 === hashConst.violatedRules ? `${this.ruleIndex}: ${this.state.title}` : this.state.title}</ControlLabel>
+                    <ControlLabel>{(this.props.hash0 === hashConst.violatedRules || this.props.hash0 === hashConst.rules) ? `${this.ruleIndex}: ${this.state.title}` : this.state.title}</ControlLabel>
                     <p>{this.state.description}</p>
                 </FormGroup>
                 <Collapse in={this.state.openPanel}>
@@ -936,7 +936,7 @@ class SnippetView extends Component {
                             );
                         }}
                     >
-                        <h2 style={titleStyle}>Violated Code Snippet </h2>
+                        <h2 style={titleStyle}>{this.state.snippetGroup === "violated" ? "Violated Code Snippet" : "Rule Following Snippet"}</h2>
                         <div style={wrapperStyle}>
                             <pre
                                 className="content"
