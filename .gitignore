@@ -2,6 +2,8 @@
 # DesignFix monorepo root .gitignore
 # ─────────────────────────────────────────────────────────────
 
+.claude
+
 # Dependencies
 node_modules/
 **/node_modules/
