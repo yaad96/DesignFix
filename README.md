@@ -123,6 +123,27 @@ Left navigation:
 
 This workflow uses the working project at `F:\CrowdCoding-ActiveDocumentation` and restores its seeded source violations from `F:\OG_Backup_CrowdCode` after each validation run.
 
+### 6.0 First-time build/run of the CrowdCoding app (either copy, any machine)
+
+The CrowdCoding app builds and serves through its portable `CrowdCoding-Runner`, which targets whatever project folder it sits inside:
+
+- **JDK 8** (Temurin 8: <https://adoptium.net/temurin/releases/?version=8>). The old `dev_appserver` runs only on Java 8. It is auto-detected in the standard install directories, or set `CROWDCODING_JAVA8_HOME`.
+- **Internet access** for the first `setup.cmd`. It downloads the GAE SDK 1.9.98, ECJ, and Guava (about 120 MB, SHA-checksummed from Maven Central). If the copy already ships an extracted `CrowdCoding-Runner\tools\` toolchain, `setup.cmd` is effectively a no-op.
+
+```powershell
+Set-Location "<project>\CrowdCoding-Runner"   # the working copy OR the backup
+.\setup.cmd                # one-time per machine
+.\run.cmd compile-strict   # compile only (the LLM-fix gate)
+.\run.cmd                  # compile + serve at http://localhost:8888  (admin: /_ah/admin)
+```
+
+**Expected output on the untouched seeded baseline. Neither result below is a real failure:**
+
+- `.\run.cmd compile-strict` exits **`-1`**, not `0`. The seeded **Rule 2** violation (`MicrotaskCommand.CreateChallengeReview` does not implement the abstract `execute(Microtask, String)`) is deliberate. The gate passes when `tools\compile.log` contains **only** this one error. Exit `0` appears only after a correct Rule 2 fix.
+- `.\run.cmd` starts the server, but every app page returns **HTTP 500**. The seeded **Rule 12** violation (`Worker` is `@Entity` without `@Id`) crashes Objectify entity registration at boot. To get a browsable instance, temporarily restore the key in `src\com\crowdcoding\entities\Worker.java` (line 40: `@Id private String userid;`) and re-run. Firebase-backed live sync and newsfeed are dead regardless (2014-era realtime database).
+
+> The backup (`OG_Backup_CrowdCode`) has no `tools\cache`, so `setup.cmd` re-downloads the 120 MB SDK there. The working copy ships the cache and sets up offline. See the runner's own `CrowdCoding-Runner\README.md` for internals, the Docker alternative, and `unprepare`.
+
 ### 6a. Open CrowdCoding
 
 1. Start the DesignFix extension and client as described in [Running the tool](#3-running-the-tool).
@@ -162,8 +183,8 @@ Write-Host "Exit code: $compileExit"
 
 The command rebuilds `war\WEB-INF\classes` and writes the complete compiler output to `CrowdCoding-Runner\tools\compile.log`.
 
-- Exit code `0` means there are no Java compilation errors. This is the expected result after correctly fixing Rule 2, **Commands must implement execute**.
-- A nonzero exit code means at least one compilation error remains. When validating a fix for another rule, the seeded Rule 2 violation remains and currently produces one expected error (typically exit code `-1`):
+- On the untouched seeded baseline this exits **`-1`**, not `0`. The seeded Rule 2 violation (`MicrotaskCommand.CreateChallengeReview` does not implement the abstract `execute(Microtask, String)`) produces exactly one known compile error (shown below), so a nonzero exit is expected here, not a failure.
+- Exit code `0` means there are no Java compilation errors. Expect `0` only after a correct fix for Rule 2 (**Commands must implement execute**). When you validate a fix for a different rule, the seeded Rule 2 violation stays in place, so the nonzero exit (typically `-1`) persists:
 
   ```text
   The type MicrotaskCommand.CreateChallengeReview must implement the inherited
