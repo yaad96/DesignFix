@@ -857,7 +857,6 @@ class SnippetView extends Component {
 
     render() {
         const uniqueKey = this.state.d.filePath;
-        const apiKey = localStorage.getItem("OPENAI_API_KEY");
 
         const titleStyle = {
             color: "#333",
@@ -950,8 +949,6 @@ class SnippetView extends Component {
                             <span style={buttonParent}>
                                 {/* render the following IF this is a violation of a rule and there is no fix yet */}
                                 {this.state.snippetGroup === "violated" &&
-                                    apiKey !== null &&
-                                    apiKey !== "" &&
                                     !this.state.suggestedSnippet && (
                                         <button
                                             onClick={(e) => {

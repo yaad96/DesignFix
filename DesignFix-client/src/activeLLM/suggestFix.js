@@ -90,13 +90,13 @@ ${f.content}
 
     while (attempt <= 3 && !success) {
         try {
-            // Read the API key from localStorage
-            const apiKey = localStorage.getItem("OPENAI_API_KEY");
-
-            // Create a new OpenAI instance with the API key from localStorage
-            // Use local proxy to avoid CORS issues with direct browser-to-API calls
+            // The real OpenAI key is injected server-side by the dev proxy
+            // (src/setupProxy.js) from OPENAI_API_KEY in the gitignored
+            // DesignFix-client/.env, so the browser never holds it. This
+            // placeholder only satisfies the SDK, which rejects an empty apiKey;
+            // the proxy overwrites the Authorization header on the way out.
             const openai = new OpenAI({
-                apiKey,
+                apiKey: "managed-by-designfix-proxy",
                 baseURL: window.location.origin + "/openai-proxy/v1",
                 dangerouslyAllowBrowser: true,
             });

@@ -23,7 +23,7 @@ They talk to each other over a WebSocket (`ws://localhost:8887`).
    - The extension resolves the srcML binary from `DesignFix-Extension/src/Constants.ts`:
      - Windows: `SRCML_PATH_WINDOWS`
    - If your srcML lives elsewhere, update the matching constant.
-4. **An OpenAI API key** (only needed for the LLM "suggest fix" feature).
+4. **An OpenAI API key** (only needed for the LLM "suggest fix" feature). Add it to the gitignored `DesignFix-client/.env` as `OPENAI_API_KEY=your-key`. The web app's dev server reads it from there and injects it into the OpenAI proxy, so the key never reaches the browser.
 5. **A target Java project** to analyze. It must contain a `ruleTable.json` (the design rules) and a `tagTable.json` at its root — these are loaded by the extension on connect.
 
 ---
@@ -95,14 +95,14 @@ Left navigation:
 - **All Rules** — every rule with satisfied/violated status.
 - **Violated Rules** — only rules with at least one violation, each showing an **Examples** count and a **Violated** count. Expand a card and open the **Violated** tab to see the offending code snippet(s) and file.
 - **Learn Design Rules** — rule documentation.
-- **Opt-In to DesignFix LLM** — where you paste your OpenAI API key (stored in the browser's `localStorage` as `OPENAI_API_KEY`). Required before requesting an LLM fix.
+- **DesignFix LLM status** (top navigation) shows whether your OpenAI key is loaded. You do not enter the key in the browser: add it to the gitignored `DesignFix-client/.env` as `OPENAI_API_KEY=your-key`. The dev server reads that file and injects the key into the OpenAI proxy, so it stays server-side.
 
 ---
 
 ## 5. Requesting and applying a fix
 
 1. Go to **Violated Rules** and expand the rule you want to fix; open its **Violated** tab to see the violating snippet and file.
-2. **Opt in to the LLM** first (paste your OpenAI key under *Opt-In to DesignFix LLM*) if you have not already.
+2. **Provide your OpenAI key** once by adding `OPENAI_API_KEY=your-key` to `DesignFix-client/.env` (gitignored). The dev server picks it up automatically on the next request; no browser entry is needed. The top navigation shows "key loaded" when it is set.
 3. Click the **Fix** action on the violation. The client calls `suggestFix()` ([DesignFix-client/src/activeLLM/suggestFix.js](DesignFix-client/src/activeLLM/suggestFix.js)), sending the LLM:
    - the design rule,
    - a rule-satisfying example (and its file path),
@@ -115,7 +115,7 @@ Left navigation:
 6. Select **DesignFix: Accept Fix** to save the change, or **DesignFix: Reject Fix** to discard the suggestion. Accepting saves the reconciled change to the target file; rejecting leaves the file unchanged.
 7. The extension watches the saved `.java` file, reconverts it to srcML, and asks the client to recheck the affected rules. If the dashboard does not update after a few seconds, reload the web page.
 
-> The OpenAI call goes through a local proxy (`/openai-proxy/v1`) to avoid browser CORS issues; the proxy is configured in the client's dev server (`setupProxy.js`).
+> The OpenAI call goes through a local proxy (`/openai-proxy/v1`) to avoid browser CORS issues. The proxy is configured in the client's dev server (`setupProxy.js`), which also injects your API key from `OPENAI_API_KEY` in `DesignFix-client/.env` so the key stays server-side and never reaches the browser.
 
 ---
 
@@ -168,14 +168,14 @@ Set-Location "<project>\CrowdCoding-Runner"   # the working copy OR the backup
 The CrowdCoding runner requires JDK 8. Before using it for the first time, prepare its pinned compiler and Google App Engine dependencies:
 
 ```powershell
-Set-Location "F:\CrowdCoding-ActiveDocumentation\CrowdCoding-Runner"
+Set-Location "<project>\CrowdCoding-Runner"
 .\setup.cmd
 ```
 
 Run the strict compilation gate after accepting a fix:
 
 ```powershell
-Set-Location "F:\CrowdCoding-ActiveDocumentation\CrowdCoding-Runner"
+Set-Location "<project>\CrowdCoding-Runner"
 .\run.cmd compile-strict
 $compileExit = $LASTEXITCODE
 Write-Host "Exit code: $compileExit"
@@ -203,7 +203,7 @@ After recording the result, restore the working source tree **and reset the runn
 # Restore both the study source (seeded violations) and the runner from the backup.
 # /XD cache keeps the runner's ~135 MB downloaded SDK archive; src has no 'cache' folder, so it is a no-op there.
 foreach ($p in @("src", "CrowdCoding-Runner")) {
-    robocopy "F:\OG_Backup_CrowdCode\$p" "F:\CrowdCoding-ActiveDocumentation\$p" /MIR /XD cache /COPY:DAT /DCOPY:DAT /R:2 /W:2
+    robocopy "<original_copy_project>\$p" "<testing_project>\$p" /MIR /XD cache /COPY:DAT /DCOPY:DAT /R:2 /W:2
     if ($LASTEXITCODE -ge 8) {
         throw "CrowdCoding reset of '$p' failed with Robocopy exit code $LASTEXITCODE"
     }
@@ -292,7 +292,7 @@ cd "..\DesignFix-client"; npm install
 # 3. Web app
 cd "DesignFix-client"; npm run start-Windows
 
-# 4. Open http://localhost:9010, wait for preprocessing,
-#    go to "Violated Rules", opt in with your OpenAI key, click Fix,
-#    review the diff, apply it, and watch the violation count drop.
+# 4. Add OPENAI_API_KEY=your-key to DesignFix-client/.env (gitignored), then open
+#    http://localhost:9010, wait for preprocessing, go to "Violated Rules",
+#    click Fix, review the diff, apply it, and watch the violation count drop.
 ```
