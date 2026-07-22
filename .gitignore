@@ -56,6 +56,10 @@ yarn-debug.log*
 yarn-error.log*
 *.log
 
+# Component READMEs (kept local only, not published to the remote)
+/DesignFix-Extension/README.md
+/DesignFix-client/README.md
+
 # Large binaries / archives / private review docs (uncomment/adjust as needed)
 srcML_win_0_9_5.zip
 *.pdf
