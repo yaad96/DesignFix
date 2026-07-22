@@ -186,7 +186,7 @@ Write-Host "Exit code: $compileExit"
 
 The command rebuilds `war\WEB-INF\classes` and writes the complete compiler output to `CrowdCoding-Runner\tools\compile.log`.
 
-- On the untouched seeded baseline this exits **`-1`**, not `0`. The seeded Rule 2 violation (`MicrotaskCommand.CreateChallengeReview` does not implement the abstract `execute(Microtask, String)`) produces exactly one known compile error (shown below), so a nonzero exit is expected here, not a failure. For Rule 2 violation only, if you are fixing other violations and apply the fix for other violation, you should see the following:
+- On the untouched seeded baseline this exits **`-1`**, not `0`. The seeded Rule 2 and Rule 16 violations produces exactly one known compile error (shown below), so a nonzero exit is expected here, not a failure.
 ```
 using JDK 8 at C:\Program Files\Eclipse Adoptium\jdk-8.0.492.9-hotspot
 compiling 101 files with ECJ (JDK 8) ...
@@ -200,10 +200,13 @@ compile finished: 3 error(s), 167 classes emitted (full log: tools\compile.log)
   tools\compile.log:16:                        ^^^^^^^^^
 > tools\compile.log:20:3. ERROR in F:\CrowdCoding-ActiveDocumentation\src\com\crowdcoding\commands\MicrotaskCommand.java (at line 147)
   tools\compile.log:21: protected static class CreateChallengeReview extends MicrotaskCommand
-  tools\compile.log:22:                        ^^^^^^^^^^^^^^^^^^^^^
+  tools\compile.log:22: 
+> tools\compile.log:26:4. ERROR in F:\CrowdCoding-ActiveDocumentation\src\com\crowdcoding\commands\ProjectCommand.java (at line 27)
+  tools\compile.log:27: return new EnableReviews(reviewsEnabled);
+  tools\compile.log:28:                         ^^^^^^^^^^^^^^^^^^^^^
 exit code: -1
 ```
-These 3 are the 3 violation instances for Rule 2. So for a non-Rule-2 violation fixing, only these should be displayed when compiling.
+So for a non-Rule-2 and non-rule-16 violation fixing, only these should be displayed when compiling.
 - Exit code `0` means there are no Java compilation errors. Expect `0` only after a correct fix for Rule 2 (**Commands must implement execute**). When you validate a fix for a different rule, the seeded Rule 2 violation stays in place, so the nonzero exit (typically `-1`) persists:
 
   ```text

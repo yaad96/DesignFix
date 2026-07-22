@@ -103,7 +103,7 @@ ${f.content}
 
             const chatCompletionA = await openai.chat.completions.create({
                 model: FIX_MODEL_A,
-                temperature: 0.2,
+                temperature: 0.5,
                 max_tokens: 1800,
                 messages: [{role: "user", content: promptA}],
             });
