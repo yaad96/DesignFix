@@ -121,7 +121,10 @@ Left navigation:
 
 ## 6. Running DesignFix with CrowdCoding
 
-This workflow uses the working project at `F:\CrowdCoding-ActiveDocumentation` and restores its seeded source violations from `F:\OG_Backup_CrowdCode` after each validation run.
+This workflow uses two folders, referred to by generic placeholders in the commands below:
+
+- `<testing_project>`: the working copy that DesignFix analyzes and where fixes are applied. For example, currently `F:\CrowdCoding-ActiveDocumentation`.
+- `<original_copy_project>`: the backup that holds the seeded baseline and is the restore source. For example, currently `F:\Backup_CrowdCode`.
 
 ### 6.0 First-time build/run of the CrowdCoding app (either copy, any machine)
 
@@ -142,7 +145,7 @@ Set-Location "<project>\CrowdCoding-Runner"   # the working copy OR the backup
 - `.\run.cmd compile-strict` exits **`-1`**, not `0`. The seeded **Rule 2** violation (`MicrotaskCommand.CreateChallengeReview` does not implement the abstract `execute(Microtask, String)`) is deliberate. The gate passes when `tools\compile.log` contains **only** this one error. Exit `0` appears only after a correct Rule 2 fix.
 - `.\run.cmd` starts the server, but every app page returns **HTTP 500**. The seeded **Rule 12** violation (`Worker` is `@Entity` without `@Id`) crashes Objectify entity registration at boot. To get a browsable instance, temporarily restore the key in `src\com\crowdcoding\entities\Worker.java` (line 40: `@Id private String userid;`) and re-run. Firebase-backed live sync and newsfeed are dead regardless (2014-era realtime database).
 
-> The backup (`OG_Backup_CrowdCode`) has no `tools\cache`, so `setup.cmd` re-downloads the 120 MB SDK there. The working copy ships the cache and sets up offline. See the runner's own `CrowdCoding-Runner\README.md` for internals, the Docker alternative, and `unprepare`.
+> The backup copy (`<original_copy_project>`) has no `tools\cache`, so `setup.cmd` re-downloads the 120 MB SDK there. The working copy ships the cache and sets up offline. See the runner's own `CrowdCoding-Runner\README.md` for internals, the Docker alternative, and `unprepare`.
 
 ### 6a. Open CrowdCoding
 
@@ -227,7 +230,7 @@ Reload <http://localhost:9010> after the reset and wait for preprocessing to fin
    cd "f:\DesignFix-Extension + Client"
    node scripts/make_cline_prompt.js `
      --rule=<nn> `
-     --project-root="f:/CrowdCoding-ActiveDocumentation" `
+     --project-root="<testing_project>" `
      --violation-file="pathe/to/the/violating/file" `
      --run=<nn> `
      --model="gpt-4o" `
@@ -247,7 +250,7 @@ Reload <http://localhost:9010> after the reset and wait for preprocessing to fin
 4. Run the strict compilation gate after accepting a fix:
 
 ```powershell
-Set-Location "F:\CrowdCoding-ActiveDocumentation\CrowdCoding-Runner"
+Set-Location "<testing_project>\CrowdCoding-Runner"
 .\run.cmd compile-strict
 $compileExit = $LASTEXITCODE
 Write-Host "Exit code: $compileExit"
@@ -260,7 +263,18 @@ Write-Host "Exit code: $compileExit"
    # Restore both the study source (seeded violations) and the runner from the backup.
    # /XD cache keeps the runner's downloaded SDK archive; src has no 'cache' folder.
    foreach ($p in @("src", "CrowdCoding-Runner")) {
-       robocopy "F:\OG_Backup_CrowdCode\$p" "F:\CrowdCoding-ActiveDocumentation\$p" /MIR /XD cache /COPY:DAT /DCOPY:DAT /R:2 /W:2
+       robocopy "<original_copy_project>\$p" "<testing_project>\$p" /MIR /XD cache /COPY:DAT /DCOPY:DAT /R:2 /W:2
+       if ($LASTEXITCODE -ge 8) {
+           throw "CrowdCoding reset of '$p' failed with Robocopy exit code $LASTEXITCODE"
+       }
+   }
+   ```
+
+   For example, if your testing project is `F:\CrowdCoding-ActiveDocumentation` and your backup is `F:\Backup_CrowdCode`, the command becomes:
+
+   ```powershell
+   foreach ($p in @("src", "CrowdCoding-Runner")) {
+       robocopy "F:\Backup_CrowdCode\$p" "F:\CrowdCoding-ActiveDocumentation\$p" /MIR /XD cache /COPY:DAT /DCOPY:DAT /R:2 /W:2
        if ($LASTEXITCODE -ge 8) {
            throw "CrowdCoding reset of '$p' failed with Robocopy exit code $LASTEXITCODE"
        }
