@@ -12,6 +12,7 @@ import { writeToFile, convertToXML, findFileAndReadContent } from './utilites';
 import { reconcile, describeReconcile, ReconcileResult } from './reconcile';
 import { codeLensChangeEmitter } from './extension';
 import { sourceSnapshotsEqual } from './sourceSnapshot';
+import { reanchorReplacements } from './reanchorReplacements';
 
 export interface DiffChunk {
     range: vscode.Range;
@@ -1064,7 +1065,7 @@ export class FollowAndAuthorRulesProcessor {
 
     /** Queue one validated edit batch for an atomic VS Code review. */
     private async applyMultiFileEdits(edits: any[], explanation?: string, schemaVersion?: number): Promise<void> {
-        const resolved: { path: string; content: string; original?: string; operation?: string }[] = [];
+        const resolved: { path: string; content: string; original?: string; operation?: string; replacements?: readonly any[] }[] = [];
         for (const edit of edits) {
             let p: string | undefined = edit?.filePath || edit?.fileToChange;
             const content: string = edit?.modifiedFileContent ?? edit?.code ?? '';
@@ -1091,6 +1092,7 @@ export class FollowAndAuthorRulesProcessor {
                 content,
                 original: typeof edit?.originalFileContent === 'string' ? edit.originalFileContent : undefined,
                 operation: edit?.operation,
+                replacements: Array.isArray(edit?.replacements) ? edit.replacements : undefined,
             });
         }
 
@@ -1132,10 +1134,20 @@ export class FollowAndAuthorRulesProcessor {
                         return;
                     }
                     if (!sourceSnapshotsEqual(edit.original, originalContent)) {
-                        vscode.window.showErrorMessage(
-                            `DesignFix: ${path.basename(edit.path)} changed after the fix was generated. Regenerate the complete fix.`
-                        );
-                        return;
+                        // The client's snapshot is a srcML round-trip that can drift
+                        // from (or lag behind) the real file, so a byte mismatch does
+                        // not prove the edited region changed. Re-anchor the
+                        // replacements against the CURRENT file: apply only if every
+                        // oldText anchor is still present exactly once, otherwise
+                        // reject this as a genuine change.
+                        const reanchored = reanchorReplacements(originalContent, edit.replacements);
+                        if (reanchored === null) {
+                            vscode.window.showErrorMessage(
+                                `DesignFix: ${path.basename(edit.path)} changed after the fix was generated. Regenerate the complete fix.`
+                            );
+                            return;
+                        }
+                        edit.content = reanchored;
                     }
                 }
             }

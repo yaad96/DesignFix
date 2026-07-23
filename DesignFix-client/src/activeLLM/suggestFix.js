@@ -104,7 +104,7 @@ ${f.content}
             const chatCompletionA = await openai.chat.completions.create({
                 model: FIX_MODEL_A,
                 temperature: 0.5,
-                max_tokens: 1800,
+                //max_tokens: 1800,
                 messages: [{role: "user", content: promptA}],
             });
 
@@ -145,7 +145,7 @@ ${file.content}
             const chatCompletionB = await openai.chat.completions.create({
                 model: FIX_MODEL_B,
                 temperature: 0,
-                max_tokens: 4000,
+                //max_tokens: 4000,
                 response_format: {type: "json_object"},
                 messages: [{role: "user", content: promptB}],
             });

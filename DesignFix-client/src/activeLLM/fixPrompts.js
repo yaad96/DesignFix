@@ -68,6 +68,7 @@ Constraints:
 - If the target already contains the construct named by the natural-language rule, do not duplicate it. Compare the existing construct with the authoritative constraint and positive example to find missing arguments, values, or companion constructs. Modify an incorrect annotation or declaration in place; never add a duplicate with the same name or role.
 - Do NOT reproduce any complete file. Do NOT use placeholders such as "existing methods" or "rest unchanged".
 - Do NOT delete or reorder imports unless the rule requires it.
+- If your fix references a type (class, annotation, interface, or enum) that is not already imported in the file you are editing, and that type is not declared in the same package or in java.lang, you MUST add the required import statement(s). Code that uses a type without importing it does not compile, so the fix is incomplete without it.
 - Do NOT invent files that were not provided. Only edit the original file and/or the related files listed above.
 
 IMPORTANT: The code above has ALREADY been determined to VIOLATE this rule by a static analyzer. The violation is real. Do not conclude that no change is needed. Your job is to produce the concrete edit that makes the analyzer pass. If the fix belongs in a related file (e.g. registering a class in a central servlet), edit that file.
@@ -80,8 +81,9 @@ Before producing your response, internally check that:
   example-specific class names, method names, variables, arguments,
   and types are adapted to the violating code;
 - the proposed edit is the smallest complete change necessary;
-- all unrelated declarations, imports, comments, formatting, and
-  behavior remain unchanged;
+- all unrelated declarations, existing imports, comments, formatting, and
+  behavior remain unchanged, except that every import required by the new
+  code is added;
 - every proposed replacement is syntactically coherent with the surrounding code.
 
 Use this check to improve the answer. Respond concisely using exactly two sections:
@@ -128,7 +130,7 @@ Only when a candidate explicitly says ALLOW_CREATE=true, a creation may use:
 The file that contains the violation is:
 ${violationFilePath}
 
-Correctness and completeness take priority over replacement or anchor size. Preserve every rule-relevant requirement from the analysis. Do not simplify the plan merely to reduce the number or size of replacements. Independently compare the candidate code with the authoritative constraint and satisfying pattern; if the analysis omitted a required component, include it now. Every required component must either already exist correctly in FILE_CONTENT or be introduced or corrected by newText. Before responding, internally map every planned annotation, annotation argument, modifier, type change, initialization or construction change, and dependent-use change to at least one replacement.
+Correctness and completeness take priority over replacement or anchor size. Preserve every rule-relevant requirement from the analysis. Do not simplify the plan merely to reduce the number or size of replacements. Independently compare the candidate code with the authoritative constraint and satisfying pattern; if the analysis omitted a required component, include it now. Every required component must either already exist correctly in FILE_CONTENT or be introduced or corrected by newText. Before responding, internally map every planned annotation, annotation argument, modifier, type change, initialization or construction change, and dependent-use change to at least one replacement, and add an import replacement for every newly referenced type that is not already imported in that file.
 
 Rules:
 - Return one edit entry for every file that must change, and no unchanged files.
@@ -143,7 +145,7 @@ Rules:
 - Do not invent a new path. Unknown paths and implicit file creation are rejected.
 - If the fix modifies a file OTHER than the file that contains the violation (shown above), you MUST state this explicitly at the start of the "explanation": clearly name which file(s) were modified and note that they differ from the file where the violation was reported, and briefly say why the fix belongs there.
 - The violation is confirmed, so do not return an empty edits array.
-- Preserve all unrelated lines, imports, comments, formatting, and behavior exactly.
+- Preserve all unrelated existing lines, imports, comments, formatting, and behavior exactly. But if your edits reference a type that is not yet imported in that file (and it is not in the same package or in java.lang), you MUST add an extra replacement that inserts the required import statement(s), anchored on the existing import block: extend the last existing "import ...;" line, or the "package ...;" line when the file has no imports. A fix that uses a new type without its import is incomplete.
 
 Return only JSON.`;
 }

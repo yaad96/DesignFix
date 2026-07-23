@@ -1109,12 +1109,55 @@ class SnippetView extends Component {
         );
     }
     UNSAFE_componentWillReceiveProps(nextProps) {
-        this.setState({
+        const newState = {
             snippetGroup: nextProps.snippetGroup,
             d: nextProps.d,
             description: nextProps.description,
             exampleSnippet: nextProps.exampleSnippet,
             exampleFilePath: nextProps.exampleFilePath
-        });
+        };
+
+        // A suggestion is built against a specific snapshot of the file(s) it
+        // touches. If any of those files changed (its srcML now differs from the
+        // copy we held), the suggestion is stale: its base snapshot no longer
+        // matches disk, so accepting it would send an outdated snapshot to the
+        // extension and fail ("changed after the fix was generated"), and the
+        // panel would keep showing the old code. Drop the stale suggestion (and
+        // its cached conversation) so the user regenerates against current content.
+        if (this.state.suggestionCreated) {
+            const norm = (p) => String(p || "").replace(/\\/g, "/");
+            const xmlOf = (files, p) => {
+                if (!Array.isArray(files)) return undefined;
+                const match = files.find((f) => norm(f.filePath) === p);
+                return match ? match.xml : undefined;
+            };
+            const involved = new Set();
+            if (this.state.d && this.state.d.filePath) involved.add(norm(this.state.d.filePath));
+            if (Array.isArray(this.state.suggestedEdits)) {
+                this.state.suggestedEdits.forEach((e) => e && e.filePath && involved.add(norm(e.filePath)));
+            }
+            let stale = false;
+            involved.forEach((p) => {
+                const oldXml = xmlOf(this.props.xmlFiles, p);
+                const newXml = xmlOf(nextProps.xmlFiles, p);
+                if (oldXml !== undefined && newXml !== undefined && oldXml !== newXml) stale = true;
+            });
+            if (stale) {
+                if (this.state.d && this.state.d.filePath) {
+                    this.clearConversationFromSessionStorage(this.state.d.filePath);
+                }
+                Object.assign(newState, {
+                    suggestionCreated: false,
+                    fixButtonClicked: false,
+                    suggestedSnippet: null,
+                    snippetExplanation: null,
+                    suggestionFileName: null,
+                    llmModifiedFileContent: null,
+                    suggestedEdits: null,
+                });
+            }
+        }
+
+        this.setState(newState);
     }
 }
