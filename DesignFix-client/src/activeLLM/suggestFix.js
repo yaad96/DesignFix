@@ -13,7 +13,7 @@ import {
 // Models used for the two-step fix pipeline. Step A produces a prose analysis,
 // step B structures it into JSON edits. Change these in one place; token usage,
 // cost, and the logged `model` all derive from them (nothing is hardcoded).
-const FIX_MODEL_A = "gpt-5.2";
+const FIX_MODEL_A = "gpt-4o";
 const FIX_MODEL_B = FIX_MODEL_A;
 
 // Per-model list prices in USD per 1M tokens { input, output }. Used to estimate
@@ -242,8 +242,10 @@ ${file.content}
                 ],
             };
 
-            // Full log record for the DesignFix agentic-comparison dataset. Written
-            // to disk by the extension when the user clicks "Accept Fix".
+            // Full log record for the DesignFix agentic-comparison dataset. Sent
+            // to the extension when the user clicks "Accept Fix" below, but held
+            // in memory there and only written to data/ once the user accepts the
+            // diff review inside VS Code. A rejected review leaves no run folder.
             llmModifiedFileContent.data.log = {
                 model: modelLabel,
                 violationFilePath,

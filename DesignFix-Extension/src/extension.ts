@@ -277,6 +277,14 @@ export function activate(context: vscode.ExtensionContext) {
                 diffChunks.splice(i, 1);
             }
         }
+        // A held fix-attempt record must never outlive the chunks it belongs
+        // to. Accept commits it and reject discards it before reaching here, so
+        // this is a no-op for both; it is the backstop that keeps any future
+        // resolution path from stranding a record in memory.
+        const faw = FollowAndAuthorRulesProcessor.getInstance();
+        for (const reviewId of new Set(chunks.map(chunk => chunk.reviewId))) {
+            faw.discardFixLog(reviewId);
+        }
         await vscode.commands.executeCommand('setContext', 'designfix.reviewActive', diffChunks.length > 0);
         codeLensChangeEmitter.fire();
     };
@@ -385,7 +393,11 @@ export function activate(context: vscode.ExtensionContext) {
 
                 const changed = prepared.filter(item => item.changed);
                 if (changed.length === 0) {
+                    // Accepted, but every target already matches the suggestion.
+                    // The user still resolved this review by accepting it, so the
+                    // attempt is recorded like any other accepted fix.
                     vscode.window.showInformationMessage('DesignFix: every file already satisfies this suggestion.');
+                    await FollowAndAuthorRulesProcessor.getInstance().commitFixLog(selectedChunk.reviewId);
                     for (const chunk of reviewChunks) { await closeReviewTab(chunk); }
                     await finishReview(reviewChunks);
                     return;
@@ -418,6 +430,12 @@ export function activate(context: vscode.ExtensionContext) {
                         throw new Error(`could not save ${item.chunk.filePath}`);
                     }
                 }
+
+                // Every file is on disk. Only now is the fix-attempt record
+                // written to data/rule_<id>/run_<NN>/. commitFixLog never
+                // rejects, so a logging failure cannot trigger the rollback
+                // below for edits that already succeeded.
+                await FollowAndAuthorRulesProcessor.getInstance().commitFixLog(selectedChunk.reviewId);
 
                 vscode.window.showInformationMessage(
                     `DesignFix: atomic fix applied to ${changed.length} file(s).`
@@ -467,6 +485,9 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Cross-file fixes are one transaction. Rejecting any tab rejects
             // every dependent edit, preventing a Rule 7-style half-state.
+            // The held fix-attempt record is dropped with them: a rejected
+            // suggestion leaves no run folder under data/.
+            FollowAndAuthorRulesProcessor.getInstance().discardFixLog(chunk.reviewId);
             for (const reviewChunk of reviewChunks) { await closeReviewTab(reviewChunk); }
             await finishReview(reviewChunks);
             vscode.window.showInformationMessage(

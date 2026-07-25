@@ -53,6 +53,11 @@ export class FollowAndAuthorRulesProcessor {
     private currentProjectPath: string;
     private reviewSequence = 0;
     private tableLoadGeneration = 0;
+    // Fix-attempt records held in memory between "the client sent a fix" and
+    // "the user resolved the VS Code review", keyed by reviewId. A record is
+    // written to data/ only when its review is accepted, and dropped when it is
+    // rejected, so every run folder corresponds to a fix that reached disk.
+    private readonly pendingFixLogs = new Map<string, any>();
     // Reused for every snippet click so each new highlight replaces the previous
     // one instead of stacking another undisposed decoration type on the editor.
     private static readonly snippetHighlight = vscode.window.createTextEditorDecorationType({
@@ -893,14 +898,18 @@ export class FollowAndAuthorRulesProcessor {
     }
 
     /**
-     * Persist a fix-attempt record under <workspace-root>/data/rule_<id>/run_<NN>/.
+     * Persist a fix-attempt record under <repo-root>/data/rule_<id>/run_<NN>/.
      * The `data` folder sits alongside the DesignFix-Extension and DesignFix-client
      * folders and is git-ignored. Each run captures everything we know about the
      * attempt: metadata, token usage, prompts, raw responses, the list of files
      * the LLM inspected, and the original/modified content of every edited file.
+     *
+     * Called only from commitFixLog, i.e. only once the user has accepted the
+     * review in VS Code and the edits have been written and saved. A run folder
+     * therefore records an APPLIED fix, never a mere proposal.
      */
     private async writeFixLog(log: any): Promise<void> {
-        // <root>/DesignFix-Extension/out -> up two levels -> workspace root.
+        // <repo-root>/DesignFix-Extension/out -> up two levels -> repo root.
         const dataRoot = path.join(__dirname, '..', '..', 'data');
 
         const sanitize = (s: string) => String(s).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown';
@@ -974,6 +983,44 @@ export class FollowAndAuthorRulesProcessor {
         vscode.window.setStatusBarMessage(`DesignFix: logged fix to data/rule_${ruleId}/run_${String(nextRun).padStart(2, '0')}`, 4000);
     }
 
+    /**
+     * Hold a fix-attempt record until its review is accepted or rejected. Only
+     * call this once at least one review tab is actually open, so a batch that
+     * never became reviewable leaves nothing behind.
+     */
+    private registerPendingFixLog(reviewId: string, log: any): void {
+        if (!log) { return; }
+        this.pendingFixLogs.set(reviewId, log);
+    }
+
+    /**
+     * Write the held record for an accepted review. Invoked by
+     * `designfix.acceptChange` after the workspace edit is applied and saved.
+     *
+     * Never rejects: a logging failure must not fail (or roll back) an accept
+     * that already reached disk.
+     */
+    public async commitFixLog(reviewId: string): Promise<void> {
+        const log = this.pendingFixLogs.get(reviewId);
+        if (!log) { return; }
+        this.pendingFixLogs.delete(reviewId);
+        try {
+            await this.writeFixLog(log);
+        } catch (err) {
+            console.error('Failed to write DesignFix fix log:', err);
+        }
+    }
+
+    /**
+     * Drop the held record for a rejected review. Nothing is written to data/,
+     * so rejected suggestions leave no run folder.
+     */
+    public discardFixLog(reviewId: string): void {
+        if (this.pendingFixLogs.delete(reviewId)) {
+            console.log(`DesignFix: discarded unwritten fix log for review ${reviewId}`);
+        }
+    }
+
     private async handleLlmModifiedFileContent(jsonData: any): Promise<void> {
         const data = jsonData?.data;
         if (!data) {
@@ -981,20 +1028,17 @@ export class FollowAndAuthorRulesProcessor {
             return;
         }
 
-        // Persist a full record of this fix attempt (files inspected/edited,
-        // prompts, responses, token usage) for the agentic-comparison dataset.
-        if (data.log) {
-            try {
-                await this.writeFixLog(data.log);
-            } catch (err) {
-                console.error('Failed to write DesignFix fix log:', err);
-            }
-        }
+        // Full record of this fix attempt (files inspected/edited, prompts,
+        // responses, token usage) for the agentic-comparison dataset. It is NOT
+        // written here: arriving from the client only means a fix was proposed.
+        // The record rides along with the review and is persisted by
+        // commitFixLog once the user accepts the diff inside VS Code.
+        const pendingLog = data.log ?? null;
 
         // Structured edit batch. One or more files are reviewed as a single
         // transaction; nothing reaches disk until the complete group is accepted.
         if (Array.isArray(data.edits) && data.edits.length >= 1) {
-            await this.applyMultiFileEdits(data.edits, data.explanation, data.schemaVersion);
+            await this.applyMultiFileEdits(data.edits, data.explanation, data.schemaVersion, pendingLog);
             return;
         }
 
@@ -1060,20 +1104,31 @@ export class FollowAndAuthorRulesProcessor {
             console.warn(`DesignFix reconcile: ${rec.truncationDetail}`);
         }
 
+        const reviewId = this.nextReviewId();
+        // Bind the record BEFORE the tab opens. openFixReview awaits its own
+        // "Accept Fix" notification and dispatches designfix.acceptChange from
+        // it, so commitFixLog can run before this call would otherwise return.
+        this.registerPendingFixLog(reviewId, pendingLog);
         await this.openFixReview(
             targetPath,
             fileContent,
             rec,
             explanation,
             true,
-            this.nextReviewId(),
+            reviewId,
             data.schemaVersion,
             'modify',
         );
     }
 
-    /** Queue one validated edit batch for an atomic VS Code review. */
-    private async applyMultiFileEdits(edits: any[], explanation?: string, schemaVersion?: number): Promise<void> {
+    /**
+     * Queue one validated edit batch for an atomic VS Code review.
+     *
+     * `pendingLog` is the client's fix-attempt record. It is bound to this
+     * batch's reviewId and persisted only if the review is accepted; every
+     * early return below therefore leaves nothing on disk.
+     */
+    private async applyMultiFileEdits(edits: any[], explanation?: string, schemaVersion?: number, pendingLog: any = null): Promise<void> {
         const resolved: { path: string; content: string; original?: string; operation?: string; replacements?: readonly any[] }[] = [];
         for (const edit of edits) {
             let p: string | undefined = edit?.filePath || edit?.fileToChange;
@@ -1167,6 +1222,10 @@ export class FollowAndAuthorRulesProcessor {
         // Keep earlier pending reviews intact. Clearing the global array here
         // orphaned their tabs and made Accept/Reject controls disappear.
         const reviewId = this.nextReviewId();
+        // Bind the record before the first chunk is pushed. Once a chunk exists
+        // its CodeLens and the status-bar button can dispatch an accept, and
+        // this loop still awaits document opens for the remaining files.
+        this.registerPendingFixLog(reviewId, pendingLog);
         let opened = 0;
         const alreadySatisfied: string[] = [];
         const truncationWarnings: string[] = [];
@@ -1211,6 +1270,12 @@ export class FollowAndAuthorRulesProcessor {
 
             await this.openFixReview(r.path, originalContent, rec, '', false, reviewId, schemaVersion, r.operation || 'modify');
             opened++;
+        }
+
+        if (opened === 0) {
+            // No tab opened, so this review can never be accepted. Release the
+            // record instead of leaving it pending for the rest of the session.
+            this.discardFixLog(reviewId);
         }
 
         await vscode.commands.executeCommand('setContext', 'designfix.reviewActive', diffChunks.length > 0);
