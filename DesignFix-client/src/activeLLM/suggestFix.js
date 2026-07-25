@@ -13,7 +13,7 @@ import {
 // Models used for the two-step fix pipeline. Step A produces a prose analysis,
 // step B structures it into JSON edits. Change these in one place; token usage,
 // cost, and the logged `model` all derive from them (nothing is hardcoded).
-const FIX_MODEL_A = "gpt-4o";
+const FIX_MODEL_A = "gpt-5.2";
 const FIX_MODEL_B = FIX_MODEL_A;
 
 // Per-model list prices in USD per 1M tokens { input, output }. Used to estimate

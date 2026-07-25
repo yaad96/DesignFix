@@ -76,7 +76,13 @@ class Utilities {
                         command: webSocketSendMessage.converted_java_snippet_msg,
                         data: {
                             fileName: data.fileName,
-                            convertedJava: Utilities.removeSrcmlAnnotations(data.xml)
+                            convertedJava: Utilities.removeSrcmlAnnotations(data.xml),
+                            // The exact displayed snippet, so the extension can
+                            // highlight it precisely instead of the reconstructed
+                            // file prefix. Absent for callers that send only xml.
+                            snippet: data.snippet !== undefined
+                                ? Utilities.removeSrcmlAnnotations(data.snippet)
+                                : undefined
                         }
                     };
                     break;

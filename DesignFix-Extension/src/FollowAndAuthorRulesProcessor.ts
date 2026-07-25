@@ -13,6 +13,7 @@ import { reconcile, describeReconcile, ReconcileResult } from './reconcile';
 import { codeLensChangeEmitter } from './extension';
 import { sourceSnapshotsEqual } from './sourceSnapshot';
 import { reanchorReplacements } from './reanchorReplacements';
+import { locateSnippet, locateByLastLine } from './locateSnippet';
 
 export interface DiffChunk {
     range: vscode.Range;
@@ -52,6 +53,11 @@ export class FollowAndAuthorRulesProcessor {
     private currentProjectPath: string;
     private reviewSequence = 0;
     private tableLoadGeneration = 0;
+    // Reused for every snippet click so each new highlight replaces the previous
+    // one instead of stacking another undisposed decoration type on the editor.
+    private static readonly snippetHighlight = vscode.window.createTextEditorDecorationType({
+        backgroundColor: 'rgba(255,255,0,0.3)'
+    });
     public readonly wsMessages: string[] = [
         WebSocketConstants.RECEIVE_EDIT_FIX,
         WebSocketConstants.SEND_CONTENT_FOR_EDIT_FIX,
@@ -442,44 +448,47 @@ export class FollowAndAuthorRulesProcessor {
 
 
             case WebSocketConstants.RECEIVE_CONVERTED_JAVA_SNIPPET_MSG:
-                console.log("ASDAD222aaaa");
                 try {
-                    //const data = JSON.parse(message);
                     const fileName = jsonData.data.fileName;
                     const convertedJava = jsonData.data.convertedJava;
-                    const lastLineSnippet = convertedJava.trim().split('\n').pop().trim();
+                    // The displayed snippet (resText) is the exact text the user
+                    // clicked. It is what should be highlighted. convertedJava, in
+                    // contrast, reconstructs the whole file from its start down to
+                    // the element (removeSiblings drops only following siblings), so
+                    // matching it would highlight the entire prefix.
+                    const displaySnippet: unknown = jsonData.data.snippet;
 
                     const openPath = vscode.Uri.file(fileName);
-                    vscode.workspace.openTextDocument(openPath).then(doc => {
-                        vscode.window.showTextDocument(doc).then(editor => {
-                            const text = doc.getText();
-                            const lines = text.split('\n');
-                            let lineIndex = -1;
+                    const snippetDoc = await vscode.workspace.openTextDocument(openPath);
+                    const snippetEditor = await vscode.window.showTextDocument(snippetDoc);
 
-                            // Find the line containing the lastLineSnippet
-                            for (let i = 0; i < lines.length; i++) {
-                                if (lines[i].includes(lastLineSnippet)) {
-                                    lineIndex = i;
-                                    break;
-                                }
-                            }
+                    // Match the whole displayed snippet, not just one of its lines.
+                    // Files that repeat a signature (FunctionCommand.java has 13
+                    // identical `execute(Function function, String projectId)`
+                    // declarations) otherwise resolve to the first copy. Callers
+                    // that send no display snippet fall back to the last-line anchor.
+                    const location = (typeof displaySnippet === 'string' && displaySnippet.trim().length > 0)
+                        ? (locateSnippet(snippetDoc.getText(), displaySnippet)
+                            ?? locateByLastLine(snippetDoc.getText(), convertedJava))
+                        : locateByLastLine(snippetDoc.getText(), convertedJava);
+                    if (location === null) {
+                        vscode.window.showWarningMessage(
+                            `DesignFix: could not locate that snippet in ${path.basename(fileName)}.`);
+                        break;
+                    }
+                    if (location.ambiguous) {
+                        console.warn(`DesignFix: snippet occurs more than once in ${fileName}; selecting the first occurrence.`);
+                    }
 
-                            if (lineIndex !== -1) {
-                                const startPos = new vscode.Position(lineIndex, 0);
-                                const endPos = new vscode.Position(lineIndex, lines[lineIndex].length);
-                                const range = new vscode.Range(startPos, endPos);
+                    const range = new vscode.Range(
+                        snippetDoc.positionAt(location.start),
+                        snippetDoc.positionAt(location.end));
 
-                                editor.selection = new vscode.Selection(startPos, endPos);
-                                editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
-
-                                // Optionally highlight the line
-                                const decoration = vscode.window.createTextEditorDecorationType({
-                                    backgroundColor: 'rgba(255,255,0,0.3)'
-                                });
-                                editor.setDecorations(decoration, [range]);
-                            }
-                        });
-                    });
+                    snippetEditor.selection = new vscode.Selection(range.start, range.end);
+                    snippetEditor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+                    // One shared decoration type, reset on every click. Creating a new
+                    // one per message leaked a highlight that could never be cleared.
+                    snippetEditor.setDecorations(FollowAndAuthorRulesProcessor.snippetHighlight, [range]);
                 } catch (error) {
                     vscode.window.showErrorMessage('Failed to process the message: ' + error);
                 }

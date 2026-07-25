@@ -740,6 +740,23 @@ const removeSiblingFunctionBodies = (node) => {
 }
 
 /**
+ * A query type dictates how many queries the runner will index into:
+ * NEXT chains two queries (findFromText reads [0] and [1]) and FIRST chains
+ * three (findAndReturnToBase reads [0], [1] and [2]). A rule that declares a
+ * type but supplies fewer queries makes the runner read past the end of the
+ * array, so validate the arity here rather than letting it throw mid-run.
+ * @param queries {string[]}
+ * @param declaredQueryType {string|undefined}
+ * @return {boolean}
+ */
+const hasExpectedQueryCount = (queries, declaredQueryType) => {
+    const list = Array.isArray(queries) ? queries : [];
+    if (declaredQueryType === queryType.next_file) return list.length >= 2;
+    if (declaredQueryType === queryType.first_file) return list.length >= 3;
+    return list.length >= 1;
+};
+
+/**
  * validate the xpath queries in ruleI
  * @param ruleI
  * @return {boolean}
@@ -749,6 +766,14 @@ const isValidXPathQueries = (ruleI) => {
     let xml = parser.parseFromString("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n" +
         "<unit xmlns=\"http://www.srcML.org/srcML/src\" revision=\"0.9.5\" language=\"Java\" filename=\"validate.java\"/>",
         "text/xml");
+
+    // A rule whose declared query type outruns its query list is rejected here.
+    // Without this an unhandled TypeError escapes checkRulesForAll and aborts
+    // verification for every remaining rule, not just the malformed one.
+    if (!hasExpectedQueryCount(ruleI.quantifierXPathQuery, ruleI.quantifierQueryType)
+        || !hasExpectedQueryCount(ruleI.constraintXPathQuery, ruleI.constraintQueryType)) {
+        return false;
+    }
 
     try {
         for (let i=0; i< ruleI.quantifierXPathQuery.length; i++)

@@ -929,10 +929,13 @@ class SnippetView extends Component {
                         style={paneStyle}
                         onClick={() => {
                             this.props.onIgnoreFile(true);
+                            // Send the displayed snippet alongside the xml so the
+                            // extension highlights the exact clicked text, not the
+                            // whole file prefix the xml reconstructs to.
                             Utilities.sendToServer(
                                 this.props.ws,
                                 webSocketSendMessage.snippet_xml_msg,
-                                this.state.d.xml,
+                                { ...this.state.d.xml, snippet: this.state.d.snippet },
                             );
                         }}
                     >
