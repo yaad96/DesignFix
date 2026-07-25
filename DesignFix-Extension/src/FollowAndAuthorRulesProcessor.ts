@@ -898,6 +898,51 @@ export class FollowAndAuthorRulesProcessor {
     }
 
     /**
+     * Render a logged path relative to the analyzed project root, with forward
+     * slashes, so a run folder is portable and machine-independent:
+     * `f:/CrowdCoding-ActiveDocumentation/src/com/x/Y.java` -> `src/com/x/Y.java`.
+     *
+     * Falls back to the original string whenever a relative form would be
+     * misleading: no project root known, a path outside the root, or a path on
+     * another drive. Logging a wrong-but-short path is worse than a long one.
+     */
+    private toProjectRelativePath(filePath: unknown): string {
+        if (typeof filePath !== 'string' || filePath.trim() === '') { return ''; }
+        const root = this.currentProjectPath;
+        if (!root) { return filePath; }
+        try {
+            const relative = path.relative(path.resolve(root), path.resolve(filePath));
+            if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+                return filePath;
+            }
+            return relative.replace(/\\/g, '/');
+        } catch {
+            return filePath;
+        }
+    }
+
+    /**
+     * Remove every occurrence of the analyzed project root from free text, so
+     * the prompts and raw model responses recorded in a run folder carry
+     * relative paths too. The client sends absolute paths to the model, so
+     * without this the run folder would still expose the local layout even
+     * though meta.json does not.
+     *
+     * Matches either separator style and any case, since Windows paths reach us
+     * both ways. This changes only what is RECORDED, never what was sent.
+     */
+    private stripProjectRootFromText(text: string): string {
+        const root = this.currentProjectPath;
+        if (!root) { return text; }
+        const segments = root.replace(/[/\\]+$/, '').split(/[/\\]+/).filter(Boolean);
+        if (segments.length === 0) { return text; }
+        const pattern = segments
+            .map(segment => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+            .join('[/\\\\]+');
+        return text.replace(new RegExp(`${pattern}[/\\\\]+`, 'gi'), '');
+    }
+
+    /**
      * Persist a fix-attempt record under <repo-root>/data/rule_<id>/run_<NN>/.
      * The `data` folder sits alongside the DesignFix-Extension and DesignFix-client
      * folders and is git-ignored. Each run captures everything we know about the
@@ -937,28 +982,34 @@ export class FollowAndAuthorRulesProcessor {
         const inspectedFiles: any[] = Array.isArray(log.inspectedFiles) ? log.inspectedFiles : [];
         const editedFiles: any[] = Array.isArray(log.editedFiles) ? log.editedFiles : [];
 
-        // meta.json: everything except the bulky file bodies and prompts.
+        // meta.json: everything except the bulky file bodies and prompts. Every
+        // path is stored relative to the analyzed project root so runs collected
+        // on different machines stay comparable and no absolute path is exposed.
         const meta = {
             ruleId: log.ruleId,
             ruleTitle: log.ruleTitle ?? '',
             model: log.model ?? '',
-            violationFilePath: log.violationFilePath ?? '',
-            exampleFilePath: log.exampleFilePath ?? '',
+            violationFilePath: this.toProjectRelativePath(log.violationFilePath),
+            exampleFilePath: this.toProjectRelativePath(log.exampleFilePath),
             tokenUsage: log.tokenUsage ?? null,
-            inspectedFiles: inspectedFiles.map(f => ({ filePath: f.filePath, reason: f.reason ?? '' })),
-            editedFiles: editedFiles.map(f => ({ filePath: f.filePath })),
+            inspectedFiles: inspectedFiles.map(f => ({
+                filePath: this.toProjectRelativePath(f.filePath),
+                reason: f.reason ?? '',
+            })),
+            editedFiles: editedFiles.map(f => ({ filePath: this.toProjectRelativePath(f.filePath) })),
             explanation: log.explanation ?? '',
         };
         await fs.writeFile(path.join(runDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf8');
 
-        // Prompts and raw model responses.
+        // Prompts and raw model responses, with the project root stripped so the
+        // paths they embed are relative like meta.json's.
         if (log.prompts) {
-            if (log.prompts.A) { await fs.writeFile(path.join(runDir, 'prompt_A.txt'), String(log.prompts.A), 'utf8'); }
-            if (log.prompts.B) { await fs.writeFile(path.join(runDir, 'prompt_B.txt'), String(log.prompts.B), 'utf8'); }
+            if (log.prompts.A) { await fs.writeFile(path.join(runDir, 'prompt_A.txt'), this.stripProjectRootFromText(String(log.prompts.A)), 'utf8'); }
+            if (log.prompts.B) { await fs.writeFile(path.join(runDir, 'prompt_B.txt'), this.stripProjectRootFromText(String(log.prompts.B)), 'utf8'); }
         }
         if (log.responses) {
-            if (log.responses.A) { await fs.writeFile(path.join(runDir, 'response_A.txt'), String(log.responses.A), 'utf8'); }
-            if (log.responses.B) { await fs.writeFile(path.join(runDir, 'response_B.json'), String(log.responses.B), 'utf8'); }
+            if (log.responses.A) { await fs.writeFile(path.join(runDir, 'response_A.txt'), this.stripProjectRootFromText(String(log.responses.A)), 'utf8'); }
+            if (log.responses.B) { await fs.writeFile(path.join(runDir, 'response_B.json'), this.stripProjectRootFromText(String(log.responses.B)), 'utf8'); }
         }
 
         // Original + modified content of every edited file, in a subfolder.
