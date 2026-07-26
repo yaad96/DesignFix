@@ -11,25 +11,14 @@ import {
 } from "./fixPrompts";
 
 // Models used for the two-step fix pipeline. Step A produces a prose analysis,
-// step B structures it into JSON edits. Change these in one place; token usage,
-// cost, and the logged `model` all derive from them (nothing is hardcoded).
+// step B structures it into JSON edits. Change these in one place; token usage
+// and the logged `model` derive from them (nothing is hardcoded).
 const FIX_MODEL_A = "gpt-4o";
 const FIX_MODEL_B = FIX_MODEL_A;
 
-// Per-model list prices in USD per 1M tokens { input, output }. Used to estimate
-// cost from reported token usage. Unknown models fall back to gpt-4o pricing.
-const MODEL_PRICING = {
-    "gpt-4o": { input: 2.5, output: 10 },
-    "gpt-5.2": { input: 1.25, output: 10 },
-};
-
-// Estimate USD cost of a single call from its usage object and model name.
-function estimateCallCost(model, usage) {
-    const price = MODEL_PRICING[model] || MODEL_PRICING["gpt-4o"];
-    const inTok = usage?.prompt_tokens || 0;
-    const outTok = usage?.completion_tokens || 0;
-    return (inTok / 1e6) * price.input + (outTok / 1e6) * price.output;
-}
+// No monetary cost is computed or logged. The per-call token counts recorded in
+// tokenUsage are the raw material, so any pricing analysis can be done offline
+// against whatever list prices applied at the time.
 
 export async function suggestFix(
     rule,
@@ -144,7 +133,7 @@ ${file.content}
 
             const chatCompletionB = await openai.chat.completions.create({
                 model: FIX_MODEL_B,
-                temperature: 0,
+                temperature: 0.2,
                 //max_tokens: 4000,
                 response_format: {type: "json_object"},
                 messages: [{role: "user", content: promptB}],
@@ -219,26 +208,22 @@ ${file.content}
             };
 
             // Aggregate token usage across both LLM calls (step A prose + step B
-            // structured JSON). Cost is estimated per call using each call's own
-            // model pricing, so the totals stay correct even when steps A and B
-            // use different models.
+            // structured JSON). Each call's own usage object is kept alongside the
+            // model that produced it, so the record stays correct even when steps
+            // A and B use different models.
             const promptTokens = (usageA.prompt_tokens || 0) + (usageB.prompt_tokens || 0);
             const completionTokens = (usageA.completion_tokens || 0) + (usageB.completion_tokens || 0);
             const totalTokens = (usageA.total_tokens || 0) + (usageB.total_tokens || 0);
-            const costA = estimateCallCost(FIX_MODEL_A, usageA);
-            const costB = estimateCallCost(FIX_MODEL_B, usageB);
-            const estimatedCostUsd = costA + costB;
-            // "gpt-4o+gpt-5.2" style label when the two steps differ.
+            // "modelA+modelB" style label when the two steps differ.
             const modelLabel = FIX_MODEL_A === FIX_MODEL_B ? FIX_MODEL_A : `${FIX_MODEL_A}+${FIX_MODEL_B}`;
             const tokenUsage = {
                 model: modelLabel,
                 promptTokens,
                 completionTokens,
                 totalTokens,
-                estimatedCostUsd: Number(estimatedCostUsd.toFixed(6)),
                 calls: [
-                    {step: "A", model: FIX_MODEL_A, estimatedCostUsd: Number(costA.toFixed(6)), ...usageA},
-                    {step: "B", model: FIX_MODEL_B, estimatedCostUsd: Number(costB.toFixed(6)), ...usageB},
+                    {step: "A", model: FIX_MODEL_A, ...usageA},
+                    {step: "B", model: FIX_MODEL_B, ...usageB},
                 ],
             };
 

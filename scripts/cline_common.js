@@ -82,9 +82,14 @@ function sha256Text(text) {
     return sha256Buffer(Buffer.from(String(text), "utf8"));
 }
 
+let atomicWriteCounter = 0;
+
 function atomicWrite(filePath, content) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+    // Counter rather than a clock: a crashed write must not leave an epoch-named
+    // temp file behind inside a run folder.
+    atomicWriteCounter += 1;
+    const tmp = `${filePath}.tmp-${process.pid}-${atomicWriteCounter}`;
     fs.writeFileSync(tmp, content);
     fs.renameSync(tmp, filePath);
 }
@@ -202,6 +207,53 @@ function resolveRuleTable(flagValue, projectRoot) {
     return null;
 }
 
+// Path recorded inside a run folder, always relative to the target project.
+// Anything outside the project root degrades to its basename so no machine path
+// reaches cline_data.
+function projectRelativePath(projectRoot, targetPath) {
+    if (!projectRoot || !targetPath) return "";
+    const rel = normalizePath(path.relative(projectRoot, targetPath));
+    if (!rel || rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) {
+        return normalizePath(path.basename(targetPath));
+    }
+    return rel;
+}
+
+// Collection-time project root. A run folder stores no absolute project path,
+// so the root must be supplied explicitly (flag or environment) or inferred
+// from a working directory that holds the target project's ruleTable.json. The
+// generator's positional guesses are deliberately NOT reused here: silently
+// pointing the collector at a different checkout would attribute some other
+// workspace's diff to this run.
+function resolveCollectionProjectRoot(flagValue) {
+    const candidates = [
+        flagValue && flagValue !== true ? String(flagValue) : null,
+        process.env.DESIGNFIX_TARGET_PROJECT_ROOT,
+        process.env.CROWDCODING_PROJECT_ROOT,
+        fs.existsSync(path.join(process.cwd(), "ruleTable.json")) ? process.cwd() : null,
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+        const resolved = path.resolve(candidate);
+        if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) return resolved;
+    }
+    return null;
+}
+
+// Provenance check that replaces the project path a run no longer stores: the
+// baseline snapshot's relative paths must still resolve under the supplied root.
+// Some tolerance is required because a repair may legitimately delete files.
+function checkProjectRootAgainstBaseline(projectRoot, baselineDir, options = {}) {
+    const sampleSize = options.sampleSize ?? 40;
+    const manifest = readJson(path.join(baselineDir, "manifest.json"), null);
+    const files = manifest && Array.isArray(manifest.files) ? manifest.files : [];
+    if (!files.length) return { ok: true, checked: 0, missing: [], reason: "no baseline manifest to compare against" };
+    const step = Math.max(1, Math.floor(files.length / sampleSize));
+    const sample = [];
+    for (let i = 0; i < files.length && sample.length < sampleSize; i += step) sample.push(files[i].path);
+    const missing = sample.filter((rel) => !fs.existsSync(path.join(projectRoot, ...rel.split("/"))));
+    return { ok: missing.length <= Math.floor(sample.length / 5), checked: sample.length, missing, reason: "" };
+}
+
 const DEFAULT_EXCLUDED_DIRS = new Set([
     ".git", "node_modules", "build", "dist", "out", "target", ".gradle",
     ".idea", ".vscode", ".classpath", ".project", ".settings",
@@ -282,13 +334,12 @@ function snapshotWorkspace(projectRoot, snapshotDir, options = {}) {
             path: rel,
             sha256: sha256Buffer(buffer),
             size: buffer.length,
-            mtimeMs: stat.mtimeMs,
         });
     }
     manifest.sort((a, b) => a.path.localeCompare(b.path));
+    // Content identity only: no project path, no creation time, no file mtimes.
+    // Change detection uses sha256, so nothing here needs a clock.
     writeJson(path.join(snapshotDir, "manifest.json"), {
-        createdAt: new Date().toISOString(),
-        projectRoot,
         fileCount: manifest.length,
         files: manifest,
     });
@@ -307,7 +358,6 @@ function currentWorkspaceManifest(projectRoot, options = {}) {
             path: normalizePath(path.relative(projectRoot, filePath)),
             sha256: sha256Buffer(buffer),
             size: buffer.length,
-            absolutePath: filePath,
         });
     }
     manifest.sort((a, b) => a.path.localeCompare(b.path));
@@ -465,6 +515,7 @@ module.exports = {
     sha256Buffer, sha256Text, atomicWrite, readJson, writeJson,
     isInside, nextRunNumber, tryGit, copyToClipboard,
     resolveClientRoot, resolveWorkspaceRoot, defaultDataRoot, resolveProjectRoot, resolveRuleTable,
+    projectRelativePath, resolveCollectionProjectRoot, checkProjectRootAgainstBaseline,
     walkFiles, snapshotWorkspace, currentWorkspaceManifest, compareWorkspaceToBaseline,
     discoverClineStorageDirs, findTaskDirs, maxMtimeRecursive,
     flattenStrings, collectNumericFields, looksBinary,

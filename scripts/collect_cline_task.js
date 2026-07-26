@@ -6,6 +6,7 @@ const {
     normalizePath, sha256Text, writeJson, readJson, defaultDataRoot, tryGit,
     discoverClineStorageDirs, findTaskDirs, maxMtimeRecursive, walkFiles,
     flattenStrings, collectNumericFields, compareWorkspaceToBaseline, looksBinary,
+    resolveCollectionProjectRoot, checkProjectRootAgainstBaseline,
 } = require("./cline_common");
 
 const RULE_RE = /designfix_rule_id\s*:\s*([A-Za-z0-9._-]+)/i;
@@ -32,8 +33,13 @@ Common options:
   --cline-storage=<path>      Cline extension global-storage directory.
                               Usually auto-discovered.
   --cline-task-dir=<path>     Directly use a known Cline task folder.
-  --data-root=<path>          Default: sibling cline_data next to client repo.
-  --project-root=<path>       Override the project path saved by the generator.
+  --data-root=<path>          Default: sibling cline_data at the workspace root.
+  --project-root=<path>       Target Java project the run was performed in.
+                              Required, because the reserved run stores no
+                              absolute project path. Falls back to
+                              DESIGNFIX_TARGET_PROJECT_ROOT,
+                              CROWDCODING_PROJECT_ROOT, or a working directory
+                              containing ruleTable.json.
   --allow-incomplete          Collect even without completion evidence.
   --allow-prompt-mismatch     Proceed even if the task prompt does not match the
                               reserved prompt (use only after manual review).
@@ -44,6 +50,11 @@ Common options:
 
 If auto-discovery fails on Windows, pass for example:
   --cline-storage="%APPDATA%\\Code\\User\\globalStorage\\saoudrizwan.claude-dev"
+
+Nothing written into the run folder carries an absolute path, a project root, or
+a timestamp; recorded paths are relative to the target project. The verbatim
+Cline logs copied into cline_task_raw/ are the one exception: they are the
+agent's own evidence and are never rewritten.
 `.trimStart());
 }
 
@@ -210,8 +221,8 @@ function buildCandidate(taskDir) {
         taskId: path.basename(taskDir),
         ruleId,
         runNumber,
+        // Selection only (newest completed task wins). Never recorded.
         modifiedAtMs: maxMtimeRecursive(taskDir),
-        modifiedAt: new Date(maxMtimeRecursive(taskDir)).toISOString(),
         completion,
         corpus,
         prompt: choosePrompt(corpus.strings, hasMarker ? ruleId : null, hasMarker ? runNumber : null),
@@ -237,12 +248,14 @@ if (expectedRun) candidates = candidates.filter((c) => c.runNumber === expectedR
 candidates.sort((a, b) => b.modifiedAtMs - a.modifiedAtMs);
 
 if (flags.list) {
-    process.stdout.write(`${JSON.stringify(candidates.map((c) => ({
+    // Candidates are already sorted newest-first; the rank is what the collector
+    // itself selects on, so it replaces the modification time here.
+    process.stdout.write(`${JSON.stringify(candidates.map((c, index) => ({
+        newestFirstRank: index + 1,
         taskDir: c.taskDir,
         taskId: c.taskId,
         ruleId: c.ruleId,
         runNumber: c.runNumber,
-        modifiedAt: c.modifiedAt,
         completed: c.completion.completed,
     })), null, 2)}\n`);
     process.exit(0);
@@ -293,6 +306,30 @@ if (!promptMatch.verified) {
     console.error(`Warning: proceeding despite prompt mismatch (--allow-prompt-mismatch): ${promptMatch.reason}.`);
 }
 
+// Resolve and validate the target project before writing anything: the run
+// folder stores no project path, so an unsupplied or wrong root has to fail
+// fast rather than half-fill the run with a foreign workspace's diff.
+const projectRoot = resolveCollectionProjectRoot(flags["project-root"]);
+if (!projectRoot) {
+    die("Project root is unavailable. Pass --project-root=<path> (or set DESIGNFIX_TARGET_PROJECT_ROOT), "
+        + "since run folders intentionally record no absolute project path.");
+}
+const baselineDir = path.join(runDir, "baseline");
+const rootCheck = checkProjectRootAgainstBaseline(projectRoot, baselineDir);
+if (!rootCheck.ok) {
+    die(`The supplied project root does not match this run's baseline snapshot: ${rootCheck.missing.length} of `
+        + `${rootCheck.checked} sampled baseline files are missing under ${projectRoot}.\n`
+        + "Point --project-root at the project the run was actually performed in.");
+}
+
+// A pruned baseline still supports the workspace comparison (that reads
+// manifest.json), but the pre-run file bodies are gone, so before-images cannot
+// be extracted. Say so rather than silently writing .modified with no .original.
+if (existingMeta.baselineFilesPruned || !fs.existsSync(path.join(baselineDir, "files"))) {
+    console.error("Warning: this run has no baseline source snapshot (pruned, or reserved with --snapshot=false). "
+        + "edited_files/*.original before-images cannot be produced; the workspace comparison is unaffected.");
+}
+
 const rawDir = path.join(runDir, "cline_task_raw");
 if (fs.existsSync(rawDir)) fs.rmSync(rawDir, { recursive: true, force: true });
 fs.mkdirSync(rawDir, { recursive: true });
@@ -340,20 +377,11 @@ writeJson(path.join(runDir, "cline_usage_fields.json"), {
 writeJson(path.join(runDir, "cline_usage_stats.json"), summarizeUsage(selected.corpus.numericFields));
 writeJson(path.join(runDir, "cline_source_files.json"), selected.corpus.files);
 
-const projectRoot = path.resolve(flags["project-root"] && flags["project-root"] !== true
-    ? String(flags["project-root"])
-    : existingMeta.projectRoot || "");
-if (!projectRoot || !fs.existsSync(projectRoot)) {
-    die("Project root is unavailable. Pass --project-root=<path> or regenerate the reserved run with the current generator.");
-}
-
-const baselineDir = path.join(runDir, "baseline");
 let changes = [];
 if (fs.existsSync(path.join(baselineDir, "manifest.json"))) {
     const comparison = compareWorkspaceToBaseline(projectRoot, baselineDir);
     changes = comparison.changes;
     writeJson(path.join(runDir, "workspace_changes.json"), {
-        comparedAt: new Date().toISOString(),
         changeCount: changes.length,
         changes: changes.map((c) => ({
             path: c.path,
@@ -388,15 +416,23 @@ const gitDiff = tryGit(projectRoot, ["diff", "--binary", "--no-ext-diff"]);
 fs.writeFileSync(path.join(runDir, "git_status_after.txt"), `${gitStatus || ""}\n`, "utf8");
 fs.writeFileSync(path.join(runDir, "git_diff_after.patch"), `${gitDiff || ""}\n`, "utf8");
 
-const collectedAt = new Date().toISOString();
+// A run reserved by an older generator still carries machine paths; drop them so
+// collecting never reintroduces an absolute path or a timestamp into the folder.
+const carriedMeta = { ...existingMeta };
+for (const key of ["projectRoot", "ruleTablePath", "violationFilePath", "collectedAt"]) delete carriedMeta[key];
+if (existingMeta.ruleTablePath && !carriedMeta.ruleTableRelativePath) {
+    carriedMeta.ruleTableRelativePath = normalizePath(path.basename(String(existingMeta.ruleTablePath)));
+}
+carriedMeta.schemaVersion = 2;
+
 const finalMeta = {
-    ...existingMeta,
+    ...carriedMeta,
     status: "collected",
-    collectedAt,
     clineTask: {
+        // Cline's own task-folder name, kept because it is the only handle that
+        // maps this run to cline_task_raw/. The storage path it lives under is
+        // machine-specific and is not recorded.
         taskId: selected.taskId,
-        sourceDirectory: selected.taskDir,
-        modifiedAt: selected.modifiedAt,
         completionEvidence: selected.completion,
         promptVerification: promptMatch,
         reservedPromptSha256: existingMeta.promptSha256 || null,
@@ -405,7 +441,6 @@ const finalMeta = {
         rawFilesSkipped: rawManifest.skipped.length,
     },
     workspaceAfter: {
-        projectRoot,
         commit: tryGit(projectRoot, ["rev-parse", "HEAD"]),
         branch: tryGit(projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]),
         status: gitStatus || "",

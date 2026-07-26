@@ -5,7 +5,7 @@ const {
     fs, path, parseArgs, die, requiredString, positiveInteger, parseBoolean,
     sanitizeComponent, normalizeText, normalizePath, sha256Text, writeJson,
     nextRunNumber, tryGit, copyToClipboard, defaultDataRoot,
-    resolveProjectRoot, resolveRuleTable, snapshotWorkspace,
+    resolveProjectRoot, resolveRuleTable, snapshotWorkspace, projectRelativePath,
 } = require("./cline_common");
 
 function help() {
@@ -30,8 +30,10 @@ Violation code (optional; omit so the agent locates the snippet itself):
 
 Paths:
   --project-root=<path>       Target Java project. Auto-detected when possible.
-  --rule-table=<path>         Override ruleTable.json.
-  --data-root=<path>          Default: sibling cline_data next to DesignFix-client.
+                              Used, echoed to the console, and never recorded.
+  --rule-table=<path>         Override ruleTable.json. Recorded relative to the
+                              project root, or by basename if it lies outside.
+  --data-root=<path>          Default: sibling cline_data at the workspace root.
 
 Run control:
   --run=<N>                   Reserve a specific run number; otherwise use next.
@@ -53,6 +55,11 @@ Cline verbatim. The collection script maps the completed task to its reserved ru
 via explicit --rule/--run plus a prompt-hash check against this prompt.
 It does not include a satisfying example, surrounding context, candidate fix
 files, the complete violation file, or cross-file repair hints.
+
+The reserved run records project-relative paths only: no absolute path, no
+project root, and no timestamps are written into cline_data. Because of that,
+collect_cline_task.js needs the project root passed to it (--project-root, or
+DESIGNFIX_TARGET_PROJECT_ROOT, or a cwd holding ruleTable.json).
 `.trimStart());
 }
 
@@ -165,16 +172,17 @@ When finished, briefly summarize:
 3. the validation commands run and their results.`;
 
 const snapshotEnabled = parseBoolean(flags.snapshot, "--snapshot", true);
+// Recorded metadata is machine-independent on purpose: paths are relative to the
+// target project and no wall-clock value is stored. The project root itself is
+// only echoed to the console for the operator, never written into cline_data.
 const metadata = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "pending",
     ruleId: String(rule.index),
     ruleTitle: rule.title || "",
     runNumber,
     runLabel,
-    projectRoot,
-    ruleTablePath,
-    violationFilePath: violationPath,
+    ruleTableRelativePath: projectRelativePath(projectRoot, ruleTablePath),
     violationFileRelativePath: violationRelative,
     model: flags.model && flags.model !== true ? String(flags.model) : "",
     clineVersion: flags["cline-version"] && flags["cline-version"] !== true ? String(flags["cline-version"]) : "",
@@ -222,4 +230,7 @@ if (flags.clipboard) {
 console.error(`Reserved run: ${runDir}`);
 console.error(`Rule ${rule.index}, run ${runLabel}`);
 console.error(`Prompt saved: ${path.join(runDir, "prompt.txt")}`);
+// Console only. The run folder stores no project path, so the collector has to
+// be given the same root: pass it with --project-root when collecting.
+console.error(`Project root used (not recorded): ${projectRoot}`);
 if (!flags.quiet) process.stdout.write(`${prompt}\n`);

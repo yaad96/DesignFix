@@ -178,7 +178,8 @@ Set-Location "<project>\CrowdCoding-Runner"
 Run the strict compilation gate after accepting a fix:
 
 ```powershell
-Set-Location "<project>\CrowdCoding-Runner"
+cd F:\DESIGNFIX-EXTENSION+CLIENT
+Set-Location "F:\All CrowdCode Versions\No_Compilation_Error_CrowdCode\CrowdCoding-Runner"
 .\run.cmd compile-strict
 $compileExit = $LASTEXITCODE
 Write-Host "Exit code: $compileExit"
@@ -261,11 +262,17 @@ Reload <http://localhost:9010> after the reset and wait for preprocessing to fin
    Cline task, paste the generated prompt, and let Cline finish. Use the same
    approvals for every run and do not provide repair hints.
 
-3. **Collect the completed task before restoring the project:**
+3. **Collect the completed task before restoring the project.** Pass the same
+   project root used in step 1; a run folder records no absolute project path, so
+   the collector has to be told where the run happened (it refuses to proceed if
+   the root does not match the run's baseline snapshot):
 
    ```powershell
    cd "f:\DesignFix-Extension + Client"
-   node scripts/collect_cline_task.js --rule=<nn> --run=<nn>
+   node scripts/collect_cline_task.js `
+     --rule=<nn> `
+     --run=<nn> `
+     --project-root="<testing_project>"
    ```
 4. Run the strict compilation gate after accepting a fix:
 
@@ -306,6 +313,20 @@ Write-Host "Exit code: $compileExit"
    ```powershell
    node scripts/analyze_cline_run.js --all
    ```
+
+   Everything the harness writes into `cline_data/` uses project-relative paths
+   only, with no project root and no timestamps; the verbatim Cline logs under
+   `cline_task_raw/` are the one exception and are never rewritten. To audit the
+   collected data, or to strip those fields from runs collected by an earlier
+   version of the scripts:
+
+   ```powershell
+   node scripts/sanitize_cline_data.js --all --check   # report only
+   node scripts/sanitize_cline_data.js --all           # strip in place
+   ```
+
+   See [scripts/README.md](scripts/README.md#recorded-paths-and-timestamps) for
+   the exact field list.
 
 
    Always collect the run before restoring. Robocopy exit codes `0` through `7`

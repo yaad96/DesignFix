@@ -90,11 +90,22 @@ workspace.
 
 ## 3. Collect the completed task
 
-After Cline finishes, identify the run explicitly:
+After Cline finishes, identify the run explicitly and pass the project the run
+was performed in:
 
 ```powershell
-node scripts/collect_cline_task.js --rule=11 --run=1
+node scripts/collect_cline_task.js --rule=11 --run=1 `
+  --project-root="C:\Research\CrowdCoding-ActiveDocumentation"
 ```
+
+`--project-root` is required because a run folder records no absolute project
+path (see [Recorded paths and timestamps](#recorded-paths-and-timestamps)). It
+falls back to `DESIGNFIX_TARGET_PROJECT_ROOT`, `CROWDCODING_PROJECT_ROOT`, or a
+working directory that contains `ruleTable.json`, and the collector refuses to
+proceed if the supplied root does not match the run's own baseline snapshot, so a
+root pointing at the wrong checkout fails before anything is written rather than
+recording a foreign workspace's diff. The generator prints the root it used
+(`Project root used (not recorded)`) so the same value can be passed here.
 
 The collector selects the newest completed repair task, verifies its prompt
 matches the reserved run's prompt, and refuses to collect on a mismatch (pass
@@ -103,6 +114,7 @@ auto-discovers the Cline global-storage folder; if it cannot, pass it directly:
 
 ```powershell
 node scripts/collect_cline_task.js --rule=11 --run=1 `
+  --project-root="C:\Research\CrowdCoding-ActiveDocumentation" `
   --cline-storage="$env:APPDATA\Code\User\globalStorage\saoudrizwan.claude-dev"
 ```
 
@@ -112,10 +124,12 @@ You can first inspect all matching candidates:
 node scripts/collect_cline_task.js --rule=11 --run=1 --list
 ```
 
-Or pass a known task folder:
+The listing is ordered newest-first (`newestFirstRank: 1` is the task the
+collector would pick). Or pass a known task folder:
 
 ```powershell
-node scripts/collect_cline_task.js `
+node scripts/collect_cline_task.js --rule=11 --run=1 `
+  --project-root="C:\Research\CrowdCoding-ActiveDocumentation" `
   --cline-task-dir="C:\...\globalStorage\saoudrizwan.claude-dev\tasks\TASK_ID"
 ```
 
@@ -142,11 +156,63 @@ cline_data/rule_11/run_01/
 │   ├── 01_File.java.original
 │   └── 01_File.java.modified
 ├── git_status_after.txt
-└── git_diff_after.patch
+├── git_diff_after.patch
+└── process_metrics.json        (added by analyze_cline_run.js)
 ```
 
 The baseline comparison is more reliable than using Git alone when the injected
 violation was already an uncommitted workspace change before Cline started.
+
+## Recorded paths and timestamps
+
+Everything the harness generates carries **project-relative paths only**: no
+absolute path, no project root, and no timestamp. `meta.json` therefore records
+`violationFileRelativePath` and `ruleTableRelativePath` instead of the absolute
+paths and `projectRoot` of earlier versions (`schemaVersion: 2`), the baseline
+manifest holds only `path`/`sha256`/`size` (change detection is content-based, so
+it needs no clock or file mtimes), and `process_metrics.json` keeps elapsed
+seconds (`durationSeconds`, `timeToFirstEditSeconds`) without the clock values
+they were derived from. Absolute paths that Cline itself logged are relativized
+against the run's own baseline snapshot: the longest tail of the logged path that
+names a snapshot file wins, `file:///` URIs are decoded first, and a path
+matching nothing is reduced to its basename with a warning. That includes path
+arguments inside recorded terminal commands, so
+`powershell -File F:\...\CrowdCoding-Runner\run.ps1 compile` is stored as
+`powershell -File CrowdCoding-Runner/run.ps1 compile`; the verbatim command stays
+in `cline_task_raw/`.
+
+Two deliberate exceptions:
+
+- The verbatim Cline logs under `cline_task_raw/` (and the extracted prompt and
+  normalized conversation drawn from them) are the agent's own evidence and are
+  never rewritten. They contain Cline's absolute paths and per-message
+  timestamps, which is also where `analyze_cline_run.js` reads the clock from.
+- `clineTask.taskId` is kept, because it is the only handle mapping a run to the
+  raw logs it came from, even though Cline derives that id from epoch
+  milliseconds.
+
+To audit or migrate existing runs:
+
+```powershell
+node scripts/sanitize_cline_data.js --all --check   # report only, exits 1 on a finding
+node scripts/sanitize_cline_data.js --all           # strip legacy fields in place
+node scripts/analyze_cline_run.js --all             # regenerate process_metrics.json
+```
+
+The migration removes the fields listed above from runs collected by earlier
+versions of the scripts, converts a legacy absolute `ruleTablePath` to a relative
+`ruleTableRelativePath`, and leaves derived durations intact. `--check` is worth
+running before archiving or publishing the data.
+
+Both modes also print a `Preserved verbatim` tally: how many absolute paths and
+dates remain inside the evidence files that are never rewritten
+(`cline_task_raw/`, `cline_conversation.txt`, `cline_prompt_extracted.txt`, and
+the `edited_files/` byte copies). Those counts do not fail `--check`; they are
+there so the exception is visible rather than implied. Note that
+`edited_files/*.original|.modified` can legitimately be full of absolute paths
+when the agent edited such a file — a javac `@sources.txt` argfile, for
+example — because they are exact copies of project files, and rewriting them
+would contradict `git_diff_after.patch`.
 
 ## 4. Compute process metrics
 
@@ -159,7 +225,7 @@ node scripts/analyze_cline_run.js --all
 This reads each collected run's `cline_task_raw/` logs and writes
 `process_metrics.json` into the run folder plus a
 `cline_data/process_metrics_summary.csv` aggregate. Per run it derives:
-wall-clock duration and time to first successful edit, API requests, tool
+elapsed duration and time to first successful edit, API requests, tool
 calls by type with failure/denial counts, files read (successful reads only —
 failed path guesses and directory searches are reported separately), files
 read/edited beyond the violation site, terminal commands, token usage and

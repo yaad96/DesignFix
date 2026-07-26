@@ -18,14 +18,18 @@ Usage:
 Options:
   --run-dir=<path>   Analyze a single collected run folder.
   --all              Analyze every collected run under the data root.
-  --data-root=<path> Default: sibling cline_data next to the repo folders.
+  --data-root=<path> Default: sibling cline_data at the workspace root.
   --quiet            Do not print the per-run summary table.
   --help
 
 Metrics are derived from api_conversation_history.json (tool calls and their
-results, per-request token/cost), ui_messages.json (wall-clock timestamps,
+results, per-request token/cost), ui_messages.json (the task's own clock,
 completion events), task_metadata.json (actual model), meta.json (violation
 site), and workspace_changes.json (on-disk ground truth for edits).
+
+process_metrics.json records project-relative paths and elapsed seconds only: no
+absolute path, no project root, and no clock value is written. Timestamps are
+read from the verbatim Cline logs to derive durations, never copied out.
 `.trimStart());
 }
 
@@ -66,15 +70,53 @@ function classifyResult(resultText) {
     return "ok";
 }
 
-function normalizeRel(p, projectRoot) {
-    let value = normalizePath(String(p || "")).trim();
-    if (projectRoot) {
-        const rootNorm = normalizePath(projectRoot).replace(/\/+$/, "");
-        if (value.toLowerCase().startsWith(`${rootNorm.toLowerCase()}/`)) {
-            value = value.slice(rootNorm.length + 1);
-        }
+// Run folders record no project root, so an absolute path that Cline happened to
+// log is relativized against the run's own baseline snapshot: the longest tail of
+// the logged path that names a snapshot file wins, otherwise the tail starting at
+// the first snapshot top-level folder. A path that matches neither is reduced to
+// its basename, and the warning that reports it carries no machine path either.
+function buildRelativizer(runDir, warnings) {
+    const manifest = readJson(path.join(runDir, "baseline", "manifest.json"), null);
+    const known = new Map();
+    const topLevel = new Map();
+    for (const entry of (manifest && Array.isArray(manifest.files) ? manifest.files : [])) {
+        const rel = normalizePath(entry && entry.path ? entry.path : "");
+        if (!rel) continue;
+        known.set(rel.toLowerCase(), rel);
+        const top = rel.split("/")[0];
+        if (top) topLevel.set(top.toLowerCase(), top);
     }
-    return value.replace(/^\.\//, "");
+    return function toRel(value) {
+        let normalized = normalizePath(String(value || "")).trim().replace(/^\.\//, "");
+        if (!normalized) return normalized;
+        // Cline logs some paths as file:/// URIs with percent-escaped spaces.
+        if (/^file:\/\/\//i.test(normalized)) {
+            normalized = normalized.replace(/^file:\/\/\//i, "");
+            try { normalized = decodeURIComponent(normalized); } catch { /* keep the escaped form */ }
+            if (!/^[A-Za-z]:\//.test(normalized)) normalized = `/${normalized}`;
+        }
+        if (!/^[A-Za-z]:\//.test(normalized) && !normalized.startsWith("/")) return normalized;
+        const segments = normalized.replace(/^[A-Za-z]:\//, "").replace(/^\/+/, "").split("/").filter(Boolean);
+        for (let i = 0; i < segments.length; i += 1) {
+            const candidate = segments.slice(i).join("/").toLowerCase();
+            if (known.has(candidate)) return known.get(candidate);
+        }
+        for (let i = 0; i < segments.length; i += 1) {
+            if (topLevel.has(segments[i].toLowerCase())) return segments.slice(i).join("/");
+        }
+        const basename = segments[segments.length - 1] || "";
+        warnings.push(`absolute path logged by Cline could not be relativized against the baseline snapshot: ${basename}`);
+        return basename;
+    };
+}
+
+// Commands are recorded here for the navigation story; cline_task_raw/ keeps the
+// verbatim text. Absolute path arguments inside a command are relativized like
+// any other logged path so no machine path lands in process_metrics.json.
+const PATH_ARGUMENT_RE = /(?:file:\/\/\/)?(?:[A-Za-z]:[\\/]|\/(?:usr|opt|home|Users|var|tmp|mnt)\/)[^\s"'<>|;,)]*/g;
+
+function relativizeCommand(command, toRel) {
+    return String(command || "").replace(PATH_ARGUMENT_RE, (match) => toRel(match) || match);
 }
 
 function analyzeRun(runDir, quiet) {
@@ -92,8 +134,8 @@ function analyzeRun(runDir, quiet) {
     }
 
     const warnings = [];
-    const projectRoot = meta.projectRoot || "";
-    const violationRel = normalizeRel(meta.violationFileRelativePath || "", projectRoot);
+    const toRel = buildRelativizer(runDir, warnings);
+    const violationRel = toRel(meta.violationFileRelativePath || "");
     const violationKey = violationRel.toLowerCase();
 
     // ---- Tool interactions: pair each assistant tool block with the result
@@ -126,7 +168,7 @@ function analyzeRun(runDir, quiet) {
                 ts: message.ts ?? null,
                 resultTs: nextUser ? nextUser.ts ?? null : null,
                 tool,
-                path: rawPath ? normalizeRel(rawPath, projectRoot) : null,
+                path: rawPath ? toRel(rawPath) : null,
                 command: command || undefined,
                 result: classifyResult(resultText),
             });
@@ -159,10 +201,16 @@ function analyzeRun(runDir, quiet) {
         ? workspaceChanges.changes.map((c) => ({ path: c.path, type: c.type }))
         : null;
     if (changedOnDisk) {
+        // Compare case-insensitively (Windows paths), but report the path as it
+        // was recorded, so a warning never disagrees with the data beside it.
         const toolSet = new Set(filesEditedByTool.map((p) => p.toLowerCase()));
         const diskSet = new Set(changedOnDisk.map((c) => c.path.toLowerCase()));
-        for (const p of diskSet) if (!toolSet.has(p)) warnings.push(`file changed on disk but not via a logged edit tool: ${p}`);
-        for (const p of toolSet) if (!diskSet.has(p)) warnings.push(`edit tool succeeded but file unchanged against baseline: ${p}`);
+        for (const change of changedOnDisk) {
+            if (!toolSet.has(change.path.toLowerCase())) warnings.push(`file changed on disk but not via a logged edit tool: ${change.path}`);
+        }
+        for (const editedPath of filesEditedByTool) {
+            if (!diskSet.has(editedPath.toLowerCase())) warnings.push(`edit tool succeeded but file unchanged against baseline: ${editedPath}`);
+        }
     }
     if (terminal.length) {
         warnings.push(`${terminal.length} terminal command(s) executed; verify none modified files outside the baseline comparison`);
@@ -204,15 +252,14 @@ function analyzeRun(runDir, quiet) {
     }
 
     const metrics = {
-        schemaVersion: 1,
-        analyzedAt: new Date().toISOString(),
+        schemaVersion: 2,
         ruleId: meta.ruleId,
         runLabel: meta.runLabel,
         clineTaskId: meta.clineTask ? meta.clineTask.taskId : null,
         model: { claimed: meta.model || null, actual: modelsUsed },
+        // Elapsed measurements only. The clock values they are derived from stay
+        // in the verbatim Cline logs and are not copied into this file.
         timing: {
-            startTs,
-            endTs,
             durationSeconds: startTs !== null && endTs !== null ? Math.round((endTs - startTs) / 1000) : null,
             timeToFirstEditSeconds: startTs !== null && firstEditTs !== null
                 ? Math.round((firstEditTs - startTs) / 1000)
@@ -229,7 +276,7 @@ function analyzeRun(runDir, quiet) {
             filesReadOk,
             fileReadFailures: readsFailed.map((x) => ({ path: x.path, result: x.result })),
             searchCalls: searches.map((x) => ({ tool: x.tool, target: x.path })),
-            terminalCommands: terminal.map((x) => ({ command: x.command || "", result: x.result })),
+            terminalCommands: terminal.map((x) => ({ command: relativizeCommand(x.command, toRel), result: x.result })),
             filesReadBeyondViolationSite: readsBeyondSite,
             uniqueFilesReadOk: filesReadOk.length,
             uniqueFilesReadBeyondViolationSite: readsBeyondSite.length,

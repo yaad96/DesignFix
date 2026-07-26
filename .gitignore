@@ -25,13 +25,13 @@ coverage/
 **/coverage/
 .vscode-test/
 
-# Experiment + agentic-comparison data (large / machine-specific)
+# Experiment + agentic-comparison data (large / machine-specific).
+# Prefix globs, unanchored and directory-only: any folder whose name starts with
+# these, at any depth. Covers _backup/_final/_old variants without new entries.
+user_study_data*/
+cline_data*/
 /data/
-/cline_data/
 /old_designFix_data/
-/user_study_data/
-/user_study_data_backup/
-/cline_data_backup/
 
 # Local scratch / model outputs (keep if you decide to version them; ignored by default)
 # /scripts/tmp/
