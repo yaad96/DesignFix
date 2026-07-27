@@ -235,6 +235,38 @@ claimed `--model` against the model id Cline actually recorded, emitting
 warnings on any mismatch. A single run can be analyzed with
 `--run-dir=cline_data/rule_<id>/run_<NN>`.
 
+## 5. List a rule's violations without the dashboard
+
+```powershell
+node scripts/list_rule_snippets.js --rule=1 --project-root="<testing_project>"
+node scripts/list_rule_snippets.js --rule=1 --project-root="<testing_project>" --show-satisfying
+node scripts/list_rule_snippets.js --rule=1 --project-root="<testing_project>" --json
+```
+
+Prints the violating snippets for one rule, grouped by project-relative file path,
+exactly as the dashboard's **Violated** tab lists them; `--show-satisfying` adds
+the **Examples** tab. Both `--rule` and `--project-root` are required and the
+project is never inferred — no environment variable, no working-directory sniffing,
+no filesystem search. Several copies of the same study project exist side by side
+(backups, an untouched original, older versions), so an inferred root would
+silently report a violation set belonging to a different project.
+
+It does not reimplement the checker. It rebuilds the extension's inputs — one
+srcML document per `.java` file, using the bundled srcML with the same
+`--max-threads 1 --in-order --language Java` flags and the same absolute
+forward-slash paths that go over the WebSocket — then runs the client's own
+`core/ruleExecutor.js` inside headless Chrome over the DevTools protocol. A real
+browser engine is required: every rule query is `src:`-prefixed and jsdom's
+`Document.evaluate` ignores namespace resolvers, so a Node-only port would report
+zero violations for every rule. Chrome or Edge is located automatically
+(`--browser=<path>` or `CHROME_PATH` to override); no npm dependency is added.
+
+The rule's own `checkForFilesFolders` filter is applied before conversion, so a
+scoped rule converts only the files it can match (rule 1: 8 files instead of 125,
+about a second end to end). A rule whose XPath does not compile is reported as an
+error rather than as zero violations — the executor signals that case by appending
+to the rule's description instead of throwing.
+
 ## Repeated runs
 
 Run the generator again without `--run`; it automatically reserves `run_02`,

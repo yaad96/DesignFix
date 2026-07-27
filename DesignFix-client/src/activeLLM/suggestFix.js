@@ -13,8 +13,10 @@ import {
 // Models used for the two-step fix pipeline. Step A produces a prose analysis,
 // step B structures it into JSON edits. Change these in one place; token usage
 // and the logged `model` derive from them (nothing is hardcoded).
-const FIX_MODEL_A = "gpt-4o";
+const FIX_MODEL_A = "gpt-4o-2024-11-20";
 const FIX_MODEL_B = FIX_MODEL_A;
+const temperatureA = 0.5; 
+const temperatureB = 0.2; 
 
 // No monetary cost is computed or logged. The per-call token counts recorded in
 // tokenUsage are the raw material, so any pricing analysis can be done offline
@@ -92,7 +94,7 @@ ${f.content}
 
             const chatCompletionA = await openai.chat.completions.create({
                 model: FIX_MODEL_A,
-                temperature: 0.5,
+                temperature: temperatureA,
                 //max_tokens: 1800,
                 messages: [{role: "user", content: promptA}],
             });
@@ -133,7 +135,7 @@ ${file.content}
 
             const chatCompletionB = await openai.chat.completions.create({
                 model: FIX_MODEL_B,
-                temperature: 0.2,
+                temperature: temperatureB,
                 //max_tokens: 4000,
                 response_format: {type: "json_object"},
                 messages: [{role: "user", content: promptB}],

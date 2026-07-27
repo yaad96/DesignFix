@@ -1,0 +1,20 @@
+rule_id,rule_title,run,violation_file,example_file,api_requests,uncached_input_tokens,output_tokens,cached_input_tokens,cache_inclusive_tokens,cached_share_pct,prompt_tokens_cache_incl,stepA_prompt_tokens,stepA_cached_tokens,stepA_completion_tokens,stepB_prompt_tokens,stepB_cached_tokens,stepB_completion_tokens
+1,All Microtask commands must be handled by Command subclasses,01,src/com/crowdcoding/commands/FunctionCommand.java,src/com/crowdcoding/commands/ADTCommand.java,2,11594,416,0,12010,0,11594,6493,0,247,5101,0,169
+1,All Microtask commands must be handled by Command subclasses,02,src/com/crowdcoding/commands/FunctionCommand.java,src/com/crowdcoding/commands/ADTCommand.java,2,6922,499,4736,12157,38.96,11658,6493,4736,320,5165,0,179
+1,All Microtask commands must be handled by Command subclasses,03,src/com/crowdcoding/commands/FunctionCommand.java,src/com/crowdcoding/commands/ADTCommand.java,2,6849,401,4736,11986,39.51,11585,6493,4736,239,5092,0,162
+3,Artifacts should be marked as a data region with an @Entity annotation,01,src/com/crowdcoding/entities/artifacts/Function.java,src/com/crowdcoding/entities/artifacts/Note.java,2,11274,381,0,11655,0,11274,6173,0,205,5101,0,176
+3,Artifacts should be marked as a data region with an @Entity annotation,02,src/com/crowdcoding/entities/artifacts/Function.java,src/com/crowdcoding/entities/artifacts/Note.java,2,6405,373,4864,11642,41.78,11269,6173,4864,201,5096,0,172
+4,Microtasks must have a reference to the Artifact that it belongs to,01,src/com/crowdcoding/entities/microtasks/Review.java,src/com/crowdcoding/entities/microtasks/ChallengeReview.java,2,5779,646,4138,10563,39.17,9917,5265,4138,383,4652,0,263
+4,Microtasks must have a reference to the Artifact that it belongs to,02,src/com/crowdcoding/entities/microtasks/Review.java,src/com/crowdcoding/entities/microtasks/ChallengeReview.java,2,9869,595,0,10464,0,9869,5265,0,320,4604,0,275
+6,Communication between artifacts should be indirected through a Command,01,src/com/crowdcoding/commands/FunctionCommand.java,src/com/crowdcoding/commands/MicrotaskCommand.java,2,15178,936,0,16114,0,15178,8670,0,581,6508,0,355
+7,Creating an Artifact should be indirected through a Command,01,src/com/crowdcoding/entities/artifacts/Function.java,src/com/crowdcoding/commands/FunctionCommand.java,2,17117,948,0,18065,0,17117,8964,0,588,8153,0,360
+7,Creating an Artifact should be indirected through a Command,02,src/com/crowdcoding/entities/artifacts/Function.java,src/com/crowdcoding/commands/FunctionCommand.java,2,9894,878,7168,17940,39.96,17062,8964,7168,523,8098,0,355
+7,Creating an Artifact should be indirected through a Command,03,src/com/crowdcoding/entities/artifacts/Function.java,src/com/crowdcoding/commands/FunctionCommand.java,2,10015,1012,7168,18195,39.4,17183,8964,7168,656,8219,0,356
+8,"Objects to be sent to an external service should have a corresponding DTO that needs to be transferred has a DTO, i.e. ObjectMapper should not be in Entity.",01,src/com/crowdcoding/entities/Project.java,src/com/crowdcoding/dto/DTO.java,2,8204,456,13952,22612,61.7,22156,14124,13952,270,8032,0,186
+8,"Objects to be sent to an external service should have a corresponding DTO that needs to be transferred has a DTO, i.e. ObjectMapper should not be in Entity.",02,src/com/crowdcoding/entities/Project.java,src/com/crowdcoding/dto/DTO.java,2,8229,416,13952,22597,61.74,22181,14124,13952,295,8057,0,121
+8,"Objects to be sent to an external service should have a corresponding DTO that needs to be transferred has a DTO, i.e. ObjectMapper should not be in Entity.",03,src/com/crowdcoding/entities/Project.java,src/com/crowdcoding/dto/DTO.java,2,8187,499,13952,22638,61.63,22139,14124,13952,253,8015,0,246
+
+ALL,MEAN (14 runs),,,,2,9679.71,604,5333.29,15617,34.15,15013,8592.07,5333.29,362.93,6420.93,0,241.07
+ALL,MIN,,,,2,5779,373,0,10464,0,9869,5265,0,201,4604,0,121
+ALL,MAX,,,,2,17117,1012,13952,22638,61.74,22181,14124,13952,656,8219,0,360
+ALL,SUM,,,,28,135516,8456,74666,218638,,210182,120289,74666,5081,89893,0,3375

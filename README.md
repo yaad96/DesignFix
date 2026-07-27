@@ -334,7 +334,60 @@ Write-Host "Exit code: $compileExit"
    destination files that are absent from the backup, verify all paths before
    running the command.
 
-## 8. Quick start (TL;DR)
+---
+
+## 8. Listing a rule's violations from the command line
+
+Inspect a rule's violation set without launching the extension, the web app, or a
+browser session:
+
+```powershell
+cd "f:\DesignFix-Extension + Client"
+node scripts/list_rule_snippets.js `
+  --rule=<nn> `
+  --project-root="<testing_project>"
+```
+
+The violating snippets are printed grouped by project-relative file, exactly as the
+dashboard's **Violated** tab lists them. Add `--show-satisfying` to also print the
+**Examples** tab, or `--json` for machine-readable output:
+
+```text
+Rule 1: All Microtask commands must be handled by Command subclasses
+  scope: INCLUDE ["src/com/crowdcoding/commands"], mode WITHIN
+  converting 8 of 125 Java file(s) with srcML...
+  quantifier matches: 56, satisfied: 55, violated: 1
+
+VIOLATIONS: 1 listed across 1 file(s)
+
+  src/com/crowdcoding/commands/FunctionCommand.java  (1)
+    [1] <function ...><specifier>public</specifier> <specifier>static</specifier> ...
+```
+
+The script does not reimplement the checker. It rebuilds the extension's inputs —
+one srcML document per in-scope `.java` file, using the srcML bundled at
+`DesignFix-Extension/bin/srcml-win/bin/srcml.exe` with the same flags and the same
+absolute forward-slash paths that go over the WebSocket — and then runs the
+client's own `core/ruleExecutor.js` inside headless Chrome over the DevTools
+protocol. A real browser engine is required: every rule query is `src:`-prefixed
+and jsdom's `Document.evaluate` ignores namespace resolvers, so a Node-only port
+would report zero violations for every rule. Chrome or Edge is located
+automatically (`--browser=<path>` or `CHROME_PATH` to override), srcML can be
+overridden with `--srcml=<path>` or `SRCML_PATH`, and no `npm install` is needed.
+
+Both `--rule` and `--project-root` are required, and the project is **never
+inferred** — no environment variable, no working directory, no filesystem search.
+Several copies of the same study project sit side by side (backups, an untouched
+original, older versions), so an inferred root would report a violation set
+belonging to a different project. A rule whose XPath does not compile is reported
+as an error rather than as zero violations.
+
+See [scripts/README.md](scripts/README.md#5-list-a-rules-violations-without-the-dashboard)
+for the full option list.
+
+---
+
+## 9. Quick start (TL;DR)
 
 ```powershell
 # 1. Install
