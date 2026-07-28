@@ -176,7 +176,6 @@ const snapshotEnabled = parseBoolean(flags.snapshot, "--snapshot", true);
 // target project and no wall-clock value is stored. The project root itself is
 // only echoed to the console for the operator, never written into cline_data.
 const metadata = {
-    schemaVersion: 2,
     status: "pending",
     ruleId: String(rule.index),
     ruleTitle: rule.title || "",

@@ -12,22 +12,24 @@
 // after observing unintended edits to context in this variant.
 
 const {
-    main, ruleBlock, exampleBlock, violationBlock, surroundingBlock, ASK, joinBlocks,
+    main, ruleBlock, exampleBlock, labeledViolationBlock, labeledSurroundingBlock,
+    ASK, joinBlocks,
 } = require("./prompt_common");
 
 const SPEC = {
     variant: "prompt4",
     script: "make_prompt_4.js",
-    title: "RQ1 Prompt 4: Prompt 3 plus surrounding code as input.",
-    summary: "Adds the enclosing class/method structure around the violation; JSON output retained.",
+    title: "RQ1 Prompt 4: Prompt 3 plus separately labeled surrounding code as input.",
+    summary: "Adds the enclosing class/method structure around the violation, with the surrounding "
+        + "context and the violation in labeled delimiters; JSON output retained.",
     needsExample: true,
     needsSurrounding: true,
     contains: { codeFix: true, explanation: true, surroundingCode: true },
     build: (ctx) => joinBlocks(
         ruleBlock(ctx),
         exampleBlock(ctx),
-        violationBlock(ctx),
-        surroundingBlock(ctx),
+        labeledViolationBlock(ctx),
+        labeledSurroundingBlock(ctx),
         ASK.jsonExplanationAndCode,
     ),
 };

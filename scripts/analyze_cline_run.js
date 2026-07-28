@@ -252,7 +252,6 @@ function analyzeRun(runDir, quiet) {
     }
 
     const metrics = {
-        schemaVersion: 2,
         ruleId: meta.ruleId,
         runLabel: meta.runLabel,
         clineTaskId: meta.clineTask ? meta.clineTask.taskId : null,

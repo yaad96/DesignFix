@@ -18,8 +18,13 @@
 // on" it, which requires a separable explanation. Drop that line from
 // prompt_common.js if Prompt 5 was actually run as free prose.
 
+// The labeled delimiters introduced by Prompt 4 are retained, since the variants
+// build incrementally and the paper reports a surrounding-code pass rate for
+// Prompt 5 as well.
+
 const {
-    main, ruleBlock, exampleBlock, violationBlock, surroundingBlock, ASK, joinBlocks,
+    main, ruleBlock, exampleBlock, labeledViolationBlock, labeledSurroundingBlock,
+    ASK, joinBlocks,
 } = require("./prompt_common");
 
 const SPEC = {
@@ -33,8 +38,8 @@ const SPEC = {
     build: (ctx) => joinBlocks(
         ruleBlock(ctx),
         exampleBlock(ctx),
-        violationBlock(ctx),
-        surroundingBlock(ctx),
+        labeledViolationBlock(ctx),
+        labeledSurroundingBlock(ctx),
         ASK.inlineSurrounding,
     ),
 };

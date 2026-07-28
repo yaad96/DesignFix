@@ -13,8 +13,8 @@ import {
 // Models used for the two-step fix pipeline. Step A produces a prose analysis,
 // step B structures it into JSON edits. Change these in one place; token usage
 // and the logged `model` derive from them (nothing is hardcoded).
-//const FIX_MODEL_A = "gpt-4o-2024-11-20";
-const FIX_MODEL_A = "gpt-5.2";
+const FIX_MODEL_A = "gpt-4o-2024-11-20";
+//const FIX_MODEL_A = "gpt-5.2";
 const FIX_MODEL_B = FIX_MODEL_A;
 const temperatureA = 0.5; 
 const temperatureB = 0.2; 
@@ -78,7 +78,7 @@ ${f.content}
     let attempt = 1;
     let success = false;
     console.log("=== PROMPT SENT TO chatGPT ===");
-    console.log(promptA);
+    //console.log(promptA);
 
     while (attempt <= 3 && !success) {
         try {

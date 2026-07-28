@@ -40,7 +40,18 @@ const SWEEP = {
 const ruleBlock = (ctx) => `Here is a design rule from the documentation:\n\n${ctx.ruleDescription}`;
 const exampleBlock = (ctx) => `Here is an example from this codebase that follows it:\n\n${ctx.exampleSurrounding}`;
 const violationBlock = (ctx) => `Here is code that violates it:\n\n${ctx.violationSnippet}`;
-const surroundingBlock = (ctx) => `Here are some surrounding code snippets for more context:\n\n${ctx.violationSurrounding}`;
+
+// From Prompt 4 on, the surrounding structure and the violation are presented as
+// separately labeled sections. The paper's Prompt 4 row is "+ Separately labeled
+// surrounding class/method structure", and Finding 3 credits these two
+// delimiters with cutting unintended modification of context code from 24% to
+// 10%. The delimiter names and layout are the ones the Final prompt uses
+// (fixPrompts.js), so the labeling a reader sees in Prompt 4 is the labeling the
+// finding is about.
+const labeledViolationBlock = (ctx) => "Here is code that violates it:\n"
+    + `<<<VIOLATION_SNIPPET>>>\n${ctx.violationSnippet}\n<<<END_VIOLATION_SNIPPET>>>`;
+const labeledSurroundingBlock = (ctx) => "Here are some surrounding code snippets for more context:\n"
+    + `<<<SURROUNDING_CONTEXT>>>\n${ctx.violationSurrounding}\n<<<END_SURROUNDING_CONTEXT>>>`;
 
 // Closing instructions, each quoted from the variant that introduces it in
 // RQ1 & RQ2.md. Later variants reuse these rather than restating them, which is
@@ -284,7 +295,8 @@ module.exports = {
     ruleBlock,
     exampleBlock,
     violationBlock,
-    surroundingBlock,
+    labeledViolationBlock,
+    labeledSurroundingBlock,
     ASK,
     joinBlocks,
     SWEEP,

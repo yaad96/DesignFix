@@ -27,10 +27,11 @@ Options:
 Removed when present:
   meta.json                projectRoot, ruleTablePath, violationFilePath,
                            collectedAt, clineTask.sourceDirectory,
-                           clineTask.modifiedAt, workspaceAfter.projectRoot
+                           clineTask.modifiedAt, workspaceAfter.projectRoot,
+                           schemaVersion
   baseline/manifest.json   createdAt, projectRoot, files[].mtimeMs
   workspace_changes.json   comparedAt
-  process_metrics.json     analyzedAt, timing.startTs, timing.endTs
+  process_metrics.json     analyzedAt, timing.startTs, timing.endTs, schemaVersion
 
 An absolute ruleTablePath is converted to a relative ruleTableRelativePath before
 being dropped, so the file name survives in relative form.
@@ -49,11 +50,11 @@ const REMOVED_KEY_PATHS = {
     "meta.json": [
         ["projectRoot"], ["ruleTablePath"], ["violationFilePath"], ["collectedAt"],
         ["clineTask", "sourceDirectory"], ["clineTask", "modifiedAt"],
-        ["workspaceAfter", "projectRoot"],
+        ["workspaceAfter", "projectRoot"], ["schemaVersion"],
     ],
     "baseline/manifest.json": [["createdAt"], ["projectRoot"]],
     "workspace_changes.json": [["comparedAt"]],
-    "process_metrics.json": [["analyzedAt"], ["timing", "startTs"], ["timing", "endTs"]],
+    "process_metrics.json": [["analyzedAt"], ["timing", "startTs"], ["timing", "endTs"], ["schemaVersion"]],
 };
 
 // Scanned for residue after stripping. Relative to a run folder, except the CSV,
@@ -146,14 +147,6 @@ function stripRunFolder(runDir) {
                 if (entry && typeof entry === "object" && "mtimeMs" in entry) { delete entry.mtimeMs; mtimes += 1; }
             }
             if (mtimes) { removed.push(`${relative}: files[].mtimeMs (${mtimes} entries)`); changed = true; }
-        }
-        if (relative === "meta.json" && json.schemaVersion !== 2) {
-            json.schemaVersion = 2;
-            changed = true;
-        }
-        if (relative === "process_metrics.json" && json.schemaVersion !== 2) {
-            json.schemaVersion = 2;
-            changed = true;
         }
         if (changed) writeJson(filePath, json);
     }

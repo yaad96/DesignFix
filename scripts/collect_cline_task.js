@@ -423,7 +423,7 @@ for (const key of ["projectRoot", "ruleTablePath", "violationFilePath", "collect
 if (existingMeta.ruleTablePath && !carriedMeta.ruleTableRelativePath) {
     carriedMeta.ruleTableRelativePath = normalizePath(path.basename(String(existingMeta.ruleTablePath)));
 }
-carriedMeta.schemaVersion = 2;
+delete carriedMeta.schemaVersion;
 
 const finalMeta = {
     ...carriedMeta,

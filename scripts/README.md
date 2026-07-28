@@ -168,7 +168,7 @@ violation was already an uncommitted workspace change before Cline started.
 Everything the harness generates carries **project-relative paths only**: no
 absolute path, no project root, and no timestamp. `meta.json` therefore records
 `violationFileRelativePath` and `ruleTableRelativePath` instead of the absolute
-paths and `projectRoot` of earlier versions (`schemaVersion: 2`), the baseline
+paths and `projectRoot` of earlier versions, the baseline
 manifest holds only `path`/`sha256`/`size` (change detection is content-based, so
 it needs no clock or file mtimes), and `process_metrics.json` keeps elapsed
 seconds (`durationSeconds`, `timeToFirstEditSeconds`) without the clock values
@@ -285,7 +285,7 @@ node scripts/prompt_scripts/make_prompt_baseline.js --rule=9 `
 | `make_prompt_1.js` | "Only output the lines of code needed to achieve the fix." | code fix |
 | `make_prompt_2.js` | a rule-satisfying example from the same codebase | code fix |
 | `make_prompt_3.js` | JSON output with `explanation` and `code` | code fix, explanation |
-| `make_prompt_4.js` | the surrounding class/method structure as input | all three |
+| `make_prompt_4.js` | the surrounding class/method structure as input, with it and the violation in labeled `<<<SURROUNDING_CONTEXT>>>` / `<<<VIOLATION_SNIPPET>>>` delimiters | all three |
 | `make_prompt_5.js` | asks for the surrounding code returned with the fix inline | all three |
 | `make_prompt_final.js` | constraint XPath, full violating file, related fix-site files, two-step JSON edit protocol | all three |
 
