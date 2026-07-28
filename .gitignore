@@ -36,6 +36,13 @@ cline_data*/
 # Local scratch / model outputs (keep if you decide to version them; ignored by default)
 # /scripts/tmp/
 
+# Checker results cached by the prompt-generation scripts. Content-addressed and
+# regenerable, so there is nothing here worth versioning.
+/scripts/.prompt_cache/
+
+# RQ1/RQ2 prompt-sweep responses (large; same treatment as data/ and cline_data/).
+/rq1/
+
 # Environment / secrets
 .env
 .env.*

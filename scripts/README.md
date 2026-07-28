@@ -267,6 +267,151 @@ about a second end to end). A rule whose XPath does not compile is reported as a
 error rather than as zero violations — the executor signals that case by appending
 to the rule's description instead of throwing.
 
+## 6. Generate the RQ1 prompt variants
+
+`scripts/prompt_scripts/` holds one script per prompt variant described in
+`RQ1 & RQ2.md`: the baseline, Prompts 1 through 5, and the Final two-step prompt
+DesignFix ships. Each takes a rule and a violation and prints the prompt.
+
+```powershell
+node scripts/prompt_scripts/make_prompt_baseline.js --rule=9 `
+  --project-root="<testing_project>" `
+  --violation-file="src\com\crowdcoding\dto\ajax\questions\AnswerDTO.java"
+```
+
+| Script | Adds over the previous variant | Scored on |
+|---|---|---|
+| `make_prompt_baseline.js` | rule plus violating snippet | code fix |
+| `make_prompt_1.js` | "Only output the lines of code needed to achieve the fix." | code fix |
+| `make_prompt_2.js` | a rule-satisfying example from the same codebase | code fix |
+| `make_prompt_3.js` | JSON output with `explanation` and `code` | code fix, explanation |
+| `make_prompt_4.js` | the surrounding class/method structure as input | all three |
+| `make_prompt_5.js` | asks for the surrounding code returned with the fix inline | all three |
+| `make_prompt_final.js` | constraint XPath, full violating file, related fix-site files, two-step JSON edit protocol | all three |
+
+All seven take `--rule`, `--project-root` and `--violation-file`. The only
+optional flags are `--index=<n>` (needed where one file holds several violations
+of a rule, such as CrowdCode rule 1 in `ADTCommand.java`), `--list-violations`,
+`--json`, `--refresh-cache` and `--help`. `make_prompt_final.js` adds
+`--call=A|B` and `--response-a-file=<path>`, since Call B embeds the model's
+Call A answer verbatim.
+
+The prompt goes to stdout and progress to stderr, so `> file.txt` captures it.
+The satisfying example is not selectable: every variant and every trial for a
+given violation must show the same one, or the comparison across variants stops
+meaning anything. The srcML and browser binaries are found automatically, with
+`SRCML_PATH` and `CHROME_PATH` as overrides.
+
+Nothing is typed in by hand. The rule text comes from `ruleTable.json`; the
+violating snippet, surrounding context and satisfying example come from running
+the real checker through `scripts/rule_engine.js` (srcML plus the client's own
+`ruleExecutor.js` in headless Chrome, for the reasons
+[list_rule_snippets.js](#5-list-a-rules-violations-without-the-dashboard)
+documents). `make_prompt_final.js` goes further and does not contain the prompt
+text at all: it loads `buildFixAnalysisPrompt`, `buildEditStructuringPrompt` and
+`buildCandidateManifest` out of `DesignFix-client/src/activeLLM/`, so a generated
+Final prompt cannot drift from the one the tool sends.
+
+Two behaviors worth knowing:
+
+- **The positive example is `satisfiedResult[0].surroundingNodes`, not
+  `.snippet`.** That is what `rulePanel` passes to `suggestFix`. The snippet is
+  the first two non-blank lines with annotations stripped, so for an annotation
+  rule it can omit the construct the rule is about. Selection follows the
+  dashboard with no file open: the first satisfying row. The live dashboard
+  prefers the currently open file when that file also satisfies the rule, which a
+  headless run cannot observe.
+- **`finalPromptExposureForThisViolation`** in `--json` counts how many *other*
+  violations of the same rule the Final prompt would additionally see for that
+  instance, through its full-file and related-file blocks. The six single-step
+  variants always show exactly one violation, so a non-zero count marks an
+  instance where the variants are not a like-for-like comparison. A note is also
+  printed to stderr. In the current corpora this affects CrowdCode rules 1, 2 and
+  10; the Android rules are unaffected.
+
+Checker results are cached under `scripts/.prompt_cache/`, keyed by the rule's
+queries and the sha256 of every scoped source file, so editing the corpus
+invalidates them automatically. The first script to touch a rule pays for the
+srcML pass and the browser launch; the rest are instant. `--refresh-cache`
+overrides.
+
+## 7. Collect model responses
+
+`run_prompt.js` builds a variant's prompt with the same code the generators use,
+sends it to the OpenAI API, and records the result.
+
+```powershell
+node scripts/prompt_scripts/run_prompt.js --variant=prompt3 --rule=9 `
+  --project-root="<testing_project>" `
+  --violation-file="src\com\crowdcoding\dto\ajax\questions\AnswerDTO.java" `
+  --model=gpt-4o-2024-11-20 --temperature=0.5 --trials=5
+```
+
+`--variant` is `baseline`, `prompt1` through `prompt5`, or `final`. The other
+required flags match the generators. Optional: `--index`, `--model`,
+`--temperature`, `--trials` (default 1), `--out-dir` (default `../rq1`),
+`--overwrite`, `--dry-run`.
+
+The key is read from `DesignFix-client/.env`, the same `OPENAI_API_KEY` line the
+dev proxy reads, so it never appears on a command line or in the results.
+`OPENAI_API_KEY` in the environment overrides it.
+
+Output is filed by the dimensions of the sweep:
+
+```text
+rq1/prompt_<nn>/model-<aug|nov>/temp_<nn>/rule_<nn>/violation_<nn>/
+├── prompt.txt        the prompt, identical for every run here
+├── run_01.json
+└── run_02.json …
+```
+
+| Segment | Values |
+|---|---|
+| `prompt_<nn>` | `00` baseline, `01`-`05` Prompts 1 to 5, `06` Final |
+| `model-<label>` | `model-aug` gpt-4o-2024-08-06, `model-nov` gpt-4o-2024-11-20 |
+| `temp_<nn>` | `01` 0.5, `02` 0.75, `03` 1.0 |
+| `rule_<nn>` | the rule index, zero-padded so folders sort |
+| `violation_<nn>` | position among the rule's violations, in checker order |
+
+`--list-violations` prints the `violation_<nn>` mapping alongside each snippet.
+`--model` and `--temperature` outside the sweep are rejected rather than filed
+under an arbitrary name.
+
+A record carries only what RQ1 and RQ2 score against:
+
+```json
+{
+  "variant": "prompt1", "model": "...", "temperature": 0.5,
+  "rule": "9", "violationFile": "src/...", "violationIndex": 1, "run": 1,
+  "contains": { "codeFix": true, "explanation": false, "surroundingCode": false },
+  "response": "...", "error": null
+}
+```
+
+`contains` states what this variant's output should hold, and therefore which of
+the three metrics can be scored against it. The prompt is not repeated in each
+record because it is identical across the folder's runs; it sits in `prompt.txt`
+beside them. For `final`, `response` is `{ "A": ..., "B": ... }`, and the record
+also carries `promptB`, which embeds that run's own Call A answer and so differs
+from run to run. `prompt.txt` holds Call A.
+
+`--trials=<n>` means "this violation should end up with n runs"; existing runs
+count toward it, so an interrupted sweep resumes by rerunning the same command.
+`--overwrite` adds n more regardless. A response truncated by the output limit is
+recorded as an `error` rather than as a wrong answer, so it does not depress the
+pass rate, and the run is redone on the next pass.
+
+Two behaviors that matter for reproducing the RQ1 numbers:
+
+- **`final` runs both calls.** Call A at the requested temperature, then Call B
+  built from the actual Call A answer and pinned at temperature 0.2, matching
+  `suggestFix.js`. A Call A that hits the output limit aborts the trial rather
+  than structuring a truncated analysis, as the tool does.
+- **Only Call B requests JSON response format.** Prompts 3 to 5 ask for JSON in
+  words alone, exactly as the .md describes, so the format deviations RQ1
+  reports ("some model outputs, while in JSON, had minor format deviations or
+  included extra text") stay observable instead of being suppressed by the API.
+
 ## Repeated runs
 
 Run the generator again without `--run`; it automatically reserves `run_02`,
