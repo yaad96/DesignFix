@@ -9,7 +9,7 @@
 //
 // Results are filed by the dimensions of the sweep:
 //
-//   <out-dir>/prompt_<nn>/model-<aug|nov>/temp_<nn>/rule_<nn>/violation_<nn>/
+//   <out-dir>/prompt_<id>/model-<label>/temp_<value>/rule_<nn>/violation_<nn>/
 //       prompt.txt      the prompt, identical for every run here
 //       run_<nn>.json   one response per run
 //
@@ -41,8 +41,12 @@ const VARIANTS = {
     prompt3: { dir: "prompt_03", module: "./make_prompt_3" },
     prompt4: { dir: "prompt_04", module: "./make_prompt_4" },
     prompt5: { dir: "prompt_05", module: "./make_prompt_5" },
-    final: { dir: "prompt_06", module: null },
+    final: { dir: "prompt_final", module: null },
 };
+
+// Keeps one decimal on a whole number so the folder reads temp_1.0, matching
+// temp_0.5 and temp_0.75. String(1.0) would otherwise give "1".
+const formatTemperature = (temperature) => (Number.isInteger(temperature) ? `${temperature}.0` : String(temperature));
 
 function help() {
     process.stdout.write(`
@@ -62,7 +66,7 @@ Optional:
   --index=<n>              Which violation within that file (default 1).
   --model=<id>             One of: ${SWEEP.models.map((m) => m.id).join(", ")}.
                            Default ${SWEEP.models[1].id}.
-  --temperature=<n>        One of: ${SWEEP.temperatures.join(", ")}. Default 0.5.
+  --temperature=<n>        One of: ${SWEEP.temperatures.map(formatTemperature).join(", ")}. Default 0.5.
                            For final this is Call A's; Call B is pinned at
                            ${TEMPERATURE_B}, as in suggestFix.js.
   --trials=<n>             How many runs this violation should end up with
@@ -73,13 +77,13 @@ Optional:
   --help
 
 Output:
-  <out-dir>/prompt_<nn>/model-<aug|nov>/temp_<nn>/rule_<nn>/violation_<nn>/
+  <out-dir>/prompt_<id>/model-<label>/temp_<value>/rule_<nn>/violation_<nn>/
       prompt.txt      the prompt, identical for every run here
       run_<nn>.json   one response per run
 
-  prompt_<nn>     ${Object.entries(VARIANTS).map(([name, v]) => `${v.dir}=${name}`).join(", ")}
+  prompt_<id>     ${Object.entries(VARIANTS).map(([name, v]) => `${v.dir}=${name}`).join(", ")}
   model-<label>   ${SWEEP.models.map((m) => `model-${m.label}=${m.id}`).join(", ")}
-  temp_<nn>       ${SWEEP.temperatures.map((t, i) => `temp_0${i + 1}=${t}`).join(", ")}
+  temp_<value>    ${SWEEP.temperatures.map((t) => `temp_${formatTemperature(t)}`).join(", ")}
   violation_<nn>  position among the rule's violations, in checker order;
                   --list-violations prints the mapping
 
@@ -161,11 +165,10 @@ async function complete({ apiKey, model, temperature, prompt, jsonMode }) {
 
 const pad2 = (value) => String(value).padStart(2, "0");
 
-// The model folder carries the paper's own short name for the snapshot
-// (model-aug, model-nov) rather than a number, because which snapshot produced a
-// result is the comparison RQ1 makes and should be readable in the path.
-// Temperature stays numbered, since its values do not shorten cleanly.
-// Anything outside the sweep is rejected rather than filed somewhere arbitrary.
+// Model and temperature folders name the condition itself rather than an index,
+// because which snapshot and which temperature produced a result is the
+// comparison RQ1 makes and should be readable straight off the path. Anything
+// outside the sweep is rejected rather than filed somewhere arbitrary.
 function modelDir(model) {
     const entry = SWEEP.models.find((candidate) => candidate.id === model);
     if (!entry) die(`--model=${model} is not in the sweep. Use one of: ${SWEEP.models.map((m) => m.id).join(", ")}.`);
@@ -173,11 +176,11 @@ function modelDir(model) {
 }
 
 function temperatureDir(temperature) {
-    const index = SWEEP.temperatures.indexOf(temperature);
-    if (index === -1) {
-        die(`--temperature=${temperature} is not in the sweep. Use one of: ${SWEEP.temperatures.join(", ")}.`);
+    if (!SWEEP.temperatures.includes(temperature)) {
+        die(`--temperature=${temperature} is not in the sweep. `
+            + `Use one of: ${SWEEP.temperatures.map(formatTemperature).join(", ")}.`);
     }
-    return `temp_${pad2(index + 1)}`;
+    return `temp_${formatTemperature(temperature)}`;
 }
 
 const ruleDir = (ruleIndex) => `rule_${pad2(sanitizeComponent(ruleIndex))}`;

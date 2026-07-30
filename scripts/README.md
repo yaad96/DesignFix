@@ -359,7 +359,7 @@ dev proxy reads, so it never appears on a command line or in the results.
 Output is filed by the dimensions of the sweep:
 
 ```text
-rq1/prompt_<nn>/model-<aug|nov>/temp_<nn>/rule_<nn>/violation_<nn>/
+rq1/prompt_<id>/model-<label>/temp_<value>/rule_<nn>/violation_<nn>/
 ├── prompt.txt        the prompt, identical for every run here
 ├── run_01.json
 └── run_02.json …
@@ -367,9 +367,9 @@ rq1/prompt_<nn>/model-<aug|nov>/temp_<nn>/rule_<nn>/violation_<nn>/
 
 | Segment | Values |
 |---|---|
-| `prompt_<nn>` | `00` baseline, `01`-`05` Prompts 1 to 5, `06` Final |
+| `prompt_<id>` | `prompt_00` baseline, `prompt_01`-`prompt_05` Prompts 1 to 5, `prompt_final` Final |
 | `model-<label>` | `model-aug` gpt-4o-2024-08-06, `model-nov` gpt-4o-2024-11-20 |
-| `temp_<nn>` | `01` 0.5, `02` 0.75, `03` 1.0 |
+| `temp_<value>` | `temp_0.5`, `temp_0.75`, `temp_1.0` |
 | `rule_<nn>` | the rule index, zero-padded so folders sort |
 | `violation_<nn>` | position among the rule's violations, in checker order |
 
@@ -429,10 +429,3 @@ needed. `tempExprFile.java`, `tempResultXmlFile.xml`, `temptestfile.java`,
 and `output.xml` (DesignFix scratch files) are excluded from snapshots and
 diffs.
 
-## Important methodological behavior
-
-The Cline prompt includes the rule title, description, tags, violation path, and
-violating snippet, mirroring the normal checker-facing information. It does not
-include DesignFix's rule-satisfying example, extracted surrounding context,
-full file content, preselected fix-site files, or cross-file hints. Cline must
-find those from the repository through its own agentic tools.
