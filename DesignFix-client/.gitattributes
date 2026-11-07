@@ -1,0 +1,3 @@
+# Vendored third-party files stay byte-for-byte identical to their upstream
+# copies, so git must never convert their line endings on checkout.
+public/vendor/** -text

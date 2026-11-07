@@ -11,12 +11,14 @@
     <link rel="manifest" href="%PUBLIC_URL%/manifest.json">
     <link rel="shortcut icon" href="%PUBLIC_URL%/favicon.ico">
 
-    <!-- Bootstrap 3.3.7, vendored from maxcdn.bootstrapcdn.com (same files, same
-         integrity hashes) so the dashboard loads nothing from third-party servers. -->
-    <link rel="stylesheet" href="%PUBLIC_URL%/vendor/bootstrap/3.3.7/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u">
+    <!-- Bootstrap 3.3.7, vendored unchanged from maxcdn.bootstrapcdn.com (verified
+         against its published sha384 hashes) so the dashboard loads nothing from
+         third-party servers. No integrity attribute: these are served from the
+         same origin, and a line-ending conversion on checkout would trip it. -->
+    <link rel="stylesheet" href="%PUBLIC_URL%/vendor/bootstrap/3.3.7/css/bootstrap.min.css">
 
     <!-- Optional theme -->
-    <link rel="stylesheet" href="%PUBLIC_URL%/vendor/bootstrap/3.3.7/css/bootstrap-theme.min.css" integrity="sha384-rHyoN1iRsVXV4nD0JutlnGaslCJuC7uwjduW9SVrLvRYooPp2bWYgmgJQIXwl/Sp">
+    <link rel="stylesheet" href="%PUBLIC_URL%/vendor/bootstrap/3.3.7/css/bootstrap-theme.min.css">
 
     <!--
       Notice the use of %PUBLIC_URL% in the tags above.
