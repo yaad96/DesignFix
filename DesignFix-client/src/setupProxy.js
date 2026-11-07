@@ -39,6 +39,21 @@ module.exports = function (app) {
     res.json({ configured: readApiKey().length > 0 });
   });
 
+  // Only the dashboard's own page may spend the key. Browsers always send an
+  // Origin header on cross-site requests, so another web page open in the
+  // browser is refused here; tools without an Origin header (curl) still work.
+  const devPort = process.env.PORT || '9010';
+  const allowedOrigins = new Set([`http://localhost:${devPort}`, `http://127.0.0.1:${devPort}`]);
+  app.use('/openai-proxy', (req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && !allowedOrigins.has(origin)) {
+      return res.status(403).json({
+        error: { message: 'Only the DesignFix dashboard may use this proxy.' },
+      });
+    }
+    next();
+  });
+
   // Fail fast with a clear message if the key is missing, instead of forwarding
   // an unauthenticated request and getting an opaque 401 back.
   app.use('/openai-proxy', (req, res, next) => {

@@ -6,6 +6,18 @@ const SRCML_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const WINDOWS_ACCESS_VIOLATION = 0xC0000005;
 const WINDOWS_HEAP_CORRUPTION = 0xC0000374;
 const STABLE_EXECUTION_ARGUMENTS = ['--max-threads', '1', '--in-order'] as const;
+// Windows status when a DLL srcML links against (the Visual C++ runtime) is missing.
+const WINDOWS_DLL_NOT_FOUND = 0xC0000135;
+
+let srcmlPathOverride = '';
+
+/**
+ * Use a specific srcML executable (the designfix.srcmlPath setting). It takes
+ * precedence over every default; an empty value restores the defaults.
+ */
+export function setSrcmlPathOverride(value: string | undefined): void {
+    srcmlPathOverride = (value ?? '').trim();
+}
 
 export type SrcmlExecutor = (
     binary: string,
@@ -22,6 +34,9 @@ const defaultExecutor: SrcmlExecutor = (binary, args, callback) => {
 };
 
 function srcmlBinary(): string {
+    if (srcmlPathOverride) {
+        return srcmlPathOverride;
+    }
     if (process.platform === 'win32') {
         return Constants.SRCML_PATH_WINDOWS;
     }
@@ -43,6 +58,23 @@ export function isRetryableSrcmlCrash(error: ExecFileException): boolean {
 
     const code = unsignedExitCode(error.code);
     return code === WINDOWS_ACCESS_VIOLATION || code === WINDOWS_HEAP_CORRUPTION;
+}
+
+export type SrcmlFailureKind = 'not-found' | 'missing-runtime' | 'other';
+
+/**
+ * Sort a failed srcML run into the causes a user can fix: the executable is
+ * missing, or (on Windows) the Visual C++ runtime it links against is missing.
+ */
+export function classifySrcmlFailure(error: unknown): SrcmlFailureKind {
+    const code = (error as { code?: unknown } | null | undefined)?.code;
+    if (code === 'ENOENT') {
+        return 'not-found';
+    }
+    if (typeof code === 'number' && unsignedExitCode(code) === WINDOWS_DLL_NOT_FOUND) {
+        return 'missing-runtime';
+    }
+    return 'other';
 }
 
 export function buildJavaToXmlArguments(inputFilePath: string): readonly string[] {

@@ -9,6 +9,7 @@ import * as fs1 from 'fs';
 import { FileChangeManager } from './FileChangeManager';
 import { writeToFile, convertToXML } from './utilites';
 import { LearnDesignRules } from './core/model/LearnDesignRules';
+import { resolveInside } from './requestGuards';
 
 export class MiningRulesProcessor {
     private static instance: MiningRulesProcessor | null = null;
@@ -58,8 +59,13 @@ export class MiningRulesProcessor {
     }
 
     public async writeDataToFileLearningDR(fileName: string, content: string) {
-        //const directoryName = path.join(this.projectPath, this.directory);
-        const filePath = path.join(this.learningDRPath, fileName);
+        // The name arrives from the dashboard. Refuse anything that would
+        // resolve outside the LearningDR folder (absolute paths, ".." parts).
+        const filePath = resolveInside(this.learningDRPath, fileName);
+        if (!filePath) {
+            console.error(`DesignFix rejected an unsafe LearningDR file name: ${JSON.stringify(fileName)}`);
+            return;
+        }
 
         console.log("File Path: ",filePath);
 

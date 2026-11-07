@@ -23,6 +23,20 @@ import Utilities from "./utilities";
 import {hashConst} from "../ui/uiConstants";
 import {SnapshotAccumulator} from "./snapshotAccumulator";
 
+/**
+ * The installed extension serves a bundled copy of this dashboard and marks
+ * the page with window.__DESIGNFIX_EMBEDDED__; its socket then lives on the
+ * same origin. A dashboard run from source (npm start) uses the extension's
+ * development socket on port 8887.
+ */
+const resolveSocketUrl = () => {
+    if (window.__DESIGNFIX_EMBEDDED__) {
+        const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+        return `${scheme}//${window.location.host}/ws`;
+    }
+    return "ws://localhost:8887";
+};
+
 class WebSocketManager extends Component {
 
     constructor(props) {
@@ -42,7 +56,7 @@ class WebSocketManager extends Component {
             return;
         }
 
-        let ws = new WebSocket("ws://localhost:8887");
+        let ws = new WebSocket(resolveSocketUrl());
         this.ws = ws;
         this.props.onUpdateWS(ws);
 

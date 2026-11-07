@@ -6,7 +6,9 @@ import { MiningRulesProcessor } from './MiningRulesProcessor';
 import { DoiProcessing } from './DoiProcessing';
 import { buildFolderHierarchy } from './utilites';
 import { WebSocketConstants } from './WebSocketConstants';
-import { convertJavaToXml } from './srcmlRunner';
+import { classifySrcmlFailure, convertJavaToXml } from './srcmlRunner';
+
+const VC_REDIST_URL = 'https://aka.ms/vs/17/release/vc_redist.x64.exe';
 
 type XmlSnapshotEntry = Readonly<{
     filePath: string;
@@ -110,6 +112,7 @@ export class FileChangeManager {
             this.runFullSync(generation, projectPath, socket, tablesReady, capturedTrigger).catch(error => {
                 if (this.isCurrent(generation, projectPath, socket)) {
                     console.error(`DesignFix full sync failed (${capturedTrigger.reason}):`, error);
+                    FileChangeManager.reportSyncFailure(error);
                 }
             });
         }, delayMs);
@@ -263,6 +266,43 @@ export class FileChangeManager {
 
     private convertToXML(inputFilePath: string): Promise<string> {
         return convertJavaToXml(inputFilePath);
+    }
+
+    private static readonly reportedFailureKinds = new Set<string>();
+
+    /**
+     * Tell the user why the project could not be analyzed, once per kind of
+     * failure, instead of leaving the dashboard silently empty.
+     */
+    private static reportSyncFailure(error: unknown): void {
+        const kind = classifySrcmlFailure(error);
+        if (FileChangeManager.reportedFailureKinds.has(kind)) {
+            return;
+        }
+        FileChangeManager.reportedFailureKinds.add(kind);
+
+        if (kind === 'not-found') {
+            void vscode.window.showErrorMessage(
+                'DesignFix could not find srcML. Install srcML 0.9.5 and set "designfix.srcmlPath" to its executable.',
+                'Open Settings'
+            ).then((choice) => {
+                if (choice === 'Open Settings') {
+                    void vscode.commands.executeCommand('workbench.action.openSettings', 'designfix.srcmlPath');
+                }
+            });
+        } else if (kind === 'missing-runtime') {
+            void vscode.window.showErrorMessage(
+                'srcML could not start because the Microsoft Visual C++ Redistributable (x64) is not installed.',
+                'Download'
+            ).then((choice) => {
+                if (choice === 'Download') {
+                    void vscode.env.openExternal(vscode.Uri.parse(VC_REDIST_URL));
+                }
+            });
+        } else {
+            const detail = error instanceof Error ? error.message : String(error);
+            void vscode.window.showErrorMessage(`DesignFix could not analyze this project: ${detail}`);
+        }
     }
 
     /** Keep IDE active-editor navigation independent from project re-analysis. */

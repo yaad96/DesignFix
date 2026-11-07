@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import * as WebSocket from 'ws';
 import { FileChangeManager } from './FileChangeManager'; // Ensure correct path is used
 //import { MessageProcessor } from './MessageProcessor';
@@ -11,22 +12,37 @@ import { DoiProcessing } from './DoiProcessing';
 import { diffChunks, DiffChunk } from './FollowAndAuthorRulesProcessor';
 import { reconcile } from './reconcile';
 import { sourceSnapshotsEqual } from './sourceSnapshot';
+import { DashboardServer } from './dashboardServer';
+import { isLoopbackAddress, isOriginAllowed } from './requestGuards';
+import { initRuntime, isDevelopmentHost } from './runtime';
+import { setSrcmlPathOverride } from './srcmlRunner';
 
 
 // EventEmitter to trigger CodeLens refresh (exported for use in other modules)
 export const codeLensChangeEmitter = new vscode.EventEmitter<void>();
 
-const port = 8887;
+// Development socket for a dashboard run from source (npm start, port 9010).
+// Installed copies serve their own bundled dashboard instead.
+const DEV_SOCKET_PORT = 8887;
+const DEV_DASHBOARD_AUTHORITIES: ReadonlySet<string> = new Set(['localhost:9010', '127.0.0.1:9010']);
+const OPENAI_KEY_SECRET = 'designfix.openaiApiKey';
+const WELCOME_SHOWN_KEY = 'designfix.welcomeShown';
 let activeWebSocket: WebSocket.WebSocket | null = null;
 
 
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Extension "DesignFix" is now active.');
-    //console.log("All xml files created");
+    initRuntime(context);
 
-    const server = new WebSocket.Server({ port });
-    console.log(`WebSocket server started on port: ${port}`);
+    const applySrcmlPath = () => setSrcmlPathOverride(
+        vscode.workspace.getConfiguration('designfix').get<string>('srcmlPath', ''));
+    applySrcmlPath();
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration('designfix.srcmlPath')) {
+            applySrcmlPath();
+        }
+    }));
 
     context.subscriptions.push(vscode.commands.registerCommand('designfix.mineRules', () => {
         if (!vscode.workspace.workspaceFolders) {
@@ -91,11 +107,11 @@ export function activate(context: vscode.ExtensionContext) {
         }));
     }));
 
-    // Register the connection handler unconditionally so the tool works whether
-    // the target folder was opened via "Open Folder" or "Add Folder to
-    // Workspace" - even if no folder was open when the extension activated
-    // (onStartupFinished). The folder is resolved per-connection below.
-    server.on('connection', (ws) => {
+    // One handler serves every dashboard connection, whether it arrives on the
+    // bundled dashboard's server or on the development socket. The folder is
+    // resolved per connection, so both "Open Folder" and "Add Folder to
+    // Workspace" work.
+    const handleConnection = (ws: WebSocket.WebSocket) => {
         // A soft refresh can establish its replacement socket before the old
         // page has finished closing. Mark the new one active first and retire
         // the predecessor so only one browser client can drive shared state.
@@ -165,15 +181,112 @@ export function activate(context: vscode.ExtensionContext) {
                 activeWebSocket = null;
             }
         });
+    };
+
+
+
+
+
+    // The bundled dashboard and its socket share one local server per window,
+    // on a free port bound to 127.0.0.1 (see dashboardServer.ts).
+    const dashboard = new DashboardServer({
+        dashboardRoot: path.join(context.extensionPath, 'dashboard'),
+        port: vscode.workspace.getConfiguration('designfix').get<number>('dashboard.port', 0),
+        getApiKey: () => context.secrets.get(OPENAI_KEY_SECRET),
+        onConnection: handleConnection,
     });
+    const dashboardReady = dashboard.start();
+    dashboardReady.then(
+        (boundPort) => console.log(`DesignFix dashboard: http://127.0.0.1:${boundPort}/`),
+        (error) => {
+            console.error('DesignFix dashboard server failed to start:', error);
+            void vscode.window.showErrorMessage(
+                `DesignFix could not start its dashboard server: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    );
+    context.subscriptions.push(new vscode.Disposable(() => dashboard.dispose()));
 
+    // A dashboard run from source (npm start, port 9010) connects to the
+    // development socket instead. It is on in an Extension Development Host,
+    // so study runs keep working, and otherwise only when the
+    // designfix.devSocket.enabled setting is on.
+    const devSocketEnabled = isDevelopmentHost()
+        || vscode.workspace.getConfiguration('designfix').get<boolean>('devSocket.enabled', false);
+    if (devSocketEnabled) {
+        // Only this machine, and only the dashboard's own page, may connect.
+        const verifyDevClient: WebSocket.VerifyClientCallbackSync = ({ origin, req }) =>
+            isLoopbackAddress(req.socket.remoteAddress) && isOriginAllowed(origin, DEV_DASHBOARD_AUTHORITIES);
+        const devServer = new WebSocket.Server({ port: DEV_SOCKET_PORT, verifyClient: verifyDevClient });
+        devServer.on('connection', handleConnection);
+        devServer.on('error', (error) => {
+            console.error(`DesignFix development socket error on port ${DEV_SOCKET_PORT}:`, error);
+            void vscode.window.showWarningMessage(
+                `DesignFix: port ${DEV_SOCKET_PORT} is unavailable, so a dashboard run from source cannot `
+                + 'connect to this window. The bundled dashboard still works.');
+        });
+        context.subscriptions.push(new vscode.Disposable(() => devServer.close()));
+    }
 
+    const openDashboard = async (): Promise<void> => {
+        let boundPort: number;
+        try {
+            boundPort = await dashboardReady;
+        } catch {
+            return; // already reported when the server failed to start
+        }
+        // asExternalUri maps the port through VS Code's port forwarding in
+        // remote development; on a local machine it returns the same address.
+        const external = await vscode.env.asExternalUri(vscode.Uri.parse(`http://127.0.0.1:${boundPort}/`));
+        dashboard.allowAuthority(external.authority);
+        await vscode.env.openExternal(external);
+    };
 
+    context.subscriptions.push(
+        vscode.commands.registerCommand('designfix.openDashboard', openDashboard),
+        vscode.commands.registerCommand('designfix.setOpenAIKey', async () => {
+            const value = await vscode.window.showInputBox({
+                title: 'DesignFix: Set OpenAI API Key',
+                prompt: 'Saved in VS Code secret storage on this machine. It is sent only to api.openai.com, when you request a fix.',
+                placeHolder: 'sk-...',
+                password: true,
+                ignoreFocusOut: true,
+                validateInput: (text) => (text.trim() ? undefined : 'Enter a key, or press Escape to cancel.'),
+            });
+            if (value === undefined) {
+                return;
+            }
+            await context.secrets.store(OPENAI_KEY_SECRET, value.trim());
+            void vscode.window.showInformationMessage('DesignFix: OpenAI API key saved. Reload the dashboard to update its status.');
+        }),
+        vscode.commands.registerCommand('designfix.clearOpenAIKey', async () => {
+            await context.secrets.delete(OPENAI_KEY_SECRET);
+            void vscode.window.showInformationMessage('DesignFix: OpenAI API key removed.');
+        })
+    );
 
+    const dashboardStatusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    dashboardStatusItem.text = '$(checklist) DesignFix';
+    dashboardStatusItem.tooltip = 'Open the DesignFix dashboard';
+    dashboardStatusItem.command = 'designfix.openDashboard';
+    dashboardStatusItem.show();
+    context.subscriptions.push(dashboardStatusItem);
 
-    context.subscriptions.push(vscode.commands.registerCommand('designfix.helloWorld', () => {
-        vscode.window.showInformationMessage('Hello World from DesignFix!');
-    }));
+    // Point new users at the dashboard, once per workspace.
+    if (!context.workspaceState.get<boolean>(WELCOME_SHOWN_KEY)) {
+        void context.workspaceState.update(WELCOME_SHOWN_KEY, true);
+        void (async () => {
+            const hasKey = Boolean(await context.secrets.get(OPENAI_KEY_SECRET));
+            const actions = hasKey ? ['Open Dashboard'] : ['Open Dashboard', 'Set OpenAI API Key'];
+            const choice = await vscode.window.showInformationMessage(
+                'DesignFix is ready for this project. Open the dashboard to see design-rule violations and request fixes.',
+                ...actions);
+            if (choice === 'Open Dashboard') {
+                await vscode.commands.executeCommand('designfix.openDashboard');
+            } else if (choice === 'Set OpenAI API Key') {
+                await vscode.commands.executeCommand('designfix.setOpenAIKey');
+            }
+        })();
+    }
 
     // CodeLens Accept/Reject integration for diff view
     context.subscriptions.push(
@@ -534,8 +647,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 
 
-    // Ensure the server is closed when the extension is deactivated
-    context.subscriptions.push(new vscode.Disposable(() => server.close()));
+    // The dashboard server and the development socket are closed through
+    // context.subscriptions, where they are registered above.
 }
 
 export function deactivate() { }

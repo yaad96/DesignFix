@@ -41,9 +41,9 @@
     "react-scripts": "4.0.3"
   },
   "scripts": {
-    "start-Mac": "PORT=9010 react-app-rewired --max_old_space_size=8192 start",
-    "start-Linux": "export SET NODE_OPTIONS=--openssl-legacy-provider PORT=9010 && react-app-rewired --max_old_space_size=8192 start",
-    "start-Windows": "set NODE_OPTIONS=--openssl-legacy-provider && set PORT=9010 && react-app-rewired --max_old_space_size=8192 start",
+    "start-Mac": "HOST=127.0.0.1 PORT=9010 react-app-rewired --max_old_space_size=8192 start",
+    "start-Linux": "export SET NODE_OPTIONS=--openssl-legacy-provider PORT=9010 HOST=127.0.0.1 && react-app-rewired --max_old_space_size=8192 start",
+    "start-Windows": "set NODE_OPTIONS=--openssl-legacy-provider && set PORT=9010 && set HOST=127.0.0.1&& react-app-rewired --max_old_space_size=8192 start",
     "build": "react-app-rewired --max_old_space_size=8192 build",
     "test": "react-scripts test --env=jsdom",
     "eject": "react-scripts eject"

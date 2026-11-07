@@ -14,6 +14,7 @@ import { codeLensChangeEmitter } from './extension';
 import { sourceSnapshotsEqual } from './sourceSnapshot';
 import { reanchorReplacements } from './reanchorReplacements';
 import { locateSnippet, locateByLastLine } from './locateSnippet';
+import { resolveFixLogRoot } from './runtime';
 
 export interface DiffChunk {
     range: vscode.Range;
@@ -943,9 +944,11 @@ export class FollowAndAuthorRulesProcessor {
     }
 
     /**
-     * Persist a fix-attempt record under <repo-root>/data/rule_<id>/run_<NN>/.
-     * The `data` folder sits alongside the DesignFix-Extension and DesignFix-client
-     * folders and is git-ignored. Each run captures everything we know about the
+     * Persist a fix-attempt record under <log-root>/rule_<id>/run_<NN>/. Whether
+     * a record is written, and where, follows the designfix.fixLogs settings
+     * (see runtime.resolveFixLogRoot): off by default for installed copies, and
+     * <repo-root>/data in an Extension Development Host, as the study scripts
+     * expect. Each run captures everything we know about the
      * attempt: metadata, token usage, prompts, raw responses, the list of files
      * the LLM inspected, and the original/modified content of every edited file.
      *
@@ -954,8 +957,10 @@ export class FollowAndAuthorRulesProcessor {
      * therefore records an APPLIED fix, never a mere proposal.
      */
     private async writeFixLog(log: any): Promise<void> {
-        // <repo-root>/DesignFix-Extension/out -> up two levels -> repo root.
-        const dataRoot = path.join(__dirname, '..', '..', 'data');
+        const dataRoot = resolveFixLogRoot();
+        if (!dataRoot) {
+            return; // recording accepted fixes is turned off
+        }
 
         const sanitize = (s: string) => String(s).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown';
         const ruleId = sanitize(log.ruleId !== undefined && log.ruleId !== null ? log.ruleId : 'unknown');
@@ -1031,7 +1036,7 @@ export class FollowAndAuthorRulesProcessor {
         }
 
         console.log(`DesignFix fix log written: ${runDir}`);
-        vscode.window.setStatusBarMessage(`DesignFix: logged fix to data/rule_${ruleId}/run_${String(nextRun).padStart(2, '0')}`, 4000);
+        vscode.window.setStatusBarMessage(`DesignFix: logged fix to rule_${ruleId}/run_${String(nextRun).padStart(2, '0')}`, 4000);
     }
 
     /**

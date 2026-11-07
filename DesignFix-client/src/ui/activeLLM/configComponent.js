@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from "react";
 
-// The OpenAI key is provided via OPENAI_API_KEY in the gitignored
-// DesignFix-client/.env and injected server-side by the dev proxy (see
-// src/setupProxy.js). This component never handles the key; it only reports
-// whether the key is configured, using the /openai-key-status endpoint.
+// The OpenAI key never reaches the browser. In the installed extension it is
+// kept in VS Code secret storage ("DesignFix: Set OpenAI API Key"); when the
+// dashboard runs from source it comes from OPENAI_API_KEY in the gitignored
+// DesignFix-client/.env (see src/setupProxy.js). Either way the server adds it
+// to OpenAI requests. This component only reports whether a key is configured,
+// using the /openai-key-status endpoint.
 const ConfigComponent = () => {
     const [configured, setConfigured] = useState(null);
 
@@ -39,10 +41,17 @@ const ConfigComponent = () => {
             {configured ? (
                 <span style={styles.ok}>DesignFix LLM: key loaded</span>
             ) : (
-                <span style={styles.missing}>
-                    Add OPENAI_API_KEY to{" "}
-                    <span style={styles.code}>DesignFix-client/.env</span>
-                </span>
+                window.__DESIGNFIX_EMBEDDED__ ? (
+                    <span style={styles.missing}>
+                        No OpenAI key: in VS Code, run{" "}
+                        <span style={styles.code}>DesignFix: Set OpenAI API Key</span>
+                    </span>
+                ) : (
+                    <span style={styles.missing}>
+                        Add OPENAI_API_KEY to{" "}
+                        <span style={styles.code}>DesignFix-client/.env</span>
+                    </span>
+                )
             )}
         </div>
     );

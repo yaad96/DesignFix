@@ -1,27 +1,73 @@
 {
   "name": "designfix",
   "displayName": "DesignFix",
-  "description": "testing",
-  "version": "0.0.3",
+  "description": "LLM-assisted detection and repair of design-rule violations in Java projects.",
+  "version": "0.1.0",
+  "publisher": "devx-gmu",
+  "preview": true,
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#FFFFFF",
+    "theme": "light"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yaad96/DesignFix-VSCode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yaad96/DesignFix-VSCode/issues"
+  },
   "engines": {
     "vscode": "^1.86.0"
   },
   "categories": [
+    "Linters",
     "Other"
   ],
-  "activationEvents": [
-    "onStartupFinished"
+  "keywords": [
+    "design rules",
+    "java",
+    "llm",
+    "srcml",
+    "static analysis"
   ],
+  "activationEvents": [
+    "workspaceContains:ruleTable.json"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "DesignFix runs the bundled srcML binary on workspace files and writes files into the workspace, so it requires a trusted workspace."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "DesignFix reads Java files from disk and runs srcML on them."
+    }
+  },
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "designfix.helloWorld",
-        "title": "Hello World"
+        "command": "designfix.openDashboard",
+        "title": "Open Dashboard",
+        "category": "DesignFix",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "designfix.setOpenAIKey",
+        "title": "Set OpenAI API Key",
+        "category": "DesignFix"
+      },
+      {
+        "command": "designfix.clearOpenAIKey",
+        "title": "Clear OpenAI API Key",
+        "category": "DesignFix"
       },
       {
         "command": "designfix.mineRules",
-        "title": "Mine Rules"
+        "title": "Mine Rules",
+        "category": "DesignFix"
       },
       {
         "command": "designfix.acceptChange",
@@ -37,7 +83,7 @@
     "menus": {
       "editor/context": [
         {
-          "when": "editorTextFocus",
+          "when": "editorTextFocus && editorLangId == java",
           "command": "designfix.mineRules",
           "group": "navigation"
         }
@@ -64,15 +110,51 @@
           "when": "designfix.reviewActive"
         }
       ]
+    },
+    "configuration": {
+      "title": "DesignFix",
+      "properties": {
+        "designfix.srcmlPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Path to a srcML **0.9.5** executable. Leave empty to use the srcML bundled for Windows, or `/usr/local/bin/srcml` (macOS) and `/usr/bin/srcml` (Linux)."
+        },
+        "designfix.dashboard.port": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 65535,
+          "markdownDescription": "Port for the local dashboard server on `127.0.0.1`. `0` picks a free port each time. Takes effect after a window reload."
+        },
+        "designfix.fixLogs.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Save a record of each accepted fix (prompts, model responses, and the original and modified files) for research use."
+        },
+        "designfix.fixLogs.directory": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Folder for fix records when `#designfix.fixLogs.enabled#` is on. Leave empty to use the extension's storage folder. A relative path is resolved against the workspace folder."
+        },
+        "designfix.devSocket.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Also accept connections on `ws://localhost:8887` from a dashboard run from source with `npm start`. Always on in an Extension Development Host. Takes effect after a window reload."
+        }
+      }
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run build:dashboard",
     "compile": "tsc -p ./",
+    "build:dashboard": "node tools/build-dashboard.js",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "package:vsix": "npx @vscode/vsce package --readme-path MARKETPLACE.md",
+    "publish:marketplace": "npx @vscode/vsce publish --readme-path MARKETPLACE.md"
   },
   "devDependencies": {
     "@types/diff": "^7.0.2",

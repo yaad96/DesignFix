@@ -9,13 +9,14 @@ module.exports = (config /*, env*/) => {
     config.optimization.minimize = false;
 
     // Provide a browser polyfill for `process` (required by the OpenAI SDK,
-    // which is loaded in a chunk that otherwise throws "process is not defined")
+    // which is loaded in a chunk that otherwise throws "process is not defined").
+    // Do not define `process.env` wholesale here: it would bake every build
+    // machine variable, including OPENAI_API_KEY loaded from .env, into the
+    // bundle. create-react-app already defines the safe subset (NODE_ENV,
+    // PUBLIC_URL, REACT_APP_*).
     config.plugins.push(
         new webpack.ProvidePlugin({
             process: 'process/browser',
-        }),
-        new webpack.DefinePlugin({
-            'process.env': JSON.stringify(process.env || {}),
         })
     );
 

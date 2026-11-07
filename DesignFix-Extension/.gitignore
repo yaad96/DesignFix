@@ -13,3 +13,6 @@ first-extension/
 ../data
 /cline_data
 ../cline_data
+
+# Built dashboard (tools/build-dashboard.js)
+/dashboard
